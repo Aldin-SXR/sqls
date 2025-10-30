@@ -12,7 +12,7 @@ import (
 
     "github.com/sqls-server/sqls/internal/config"
     "github.com/sqls-server/sqls/internal/database"
-    // lintconfig used indirectly via diagnostics setup
+    "github.com/sqls-server/sqls/internal/lintconfig"
     "github.com/sqls-server/sqls/internal/linter"
     "github.com/sqls-server/sqls/internal/lsp"
 )
@@ -489,18 +489,22 @@ func (s *Server) getConnection(index int) *database.DBConfig {
 }
 
 func (s *Server) getConfig() *config.Config {
-	var cfg *config.Config
-	switch {
-	case validConfig(s.SpecificFileCfg):
-		cfg = s.SpecificFileCfg
+    var cfg *config.Config
+    switch {
+    case validConfig(s.SpecificFileCfg):
+        cfg = s.SpecificFileCfg
 	case validConfig(s.WSCfg):
 		cfg = s.WSCfg
 	case validConfig(s.DefaultFileCfg):
 		cfg = s.DefaultFileCfg
-	default:
-		cfg = config.NewConfig()
-	}
-	return cfg
+    default:
+        cfg = config.NewConfig()
+    }
+    // Ensure linter config is always non-nil with sensible defaults
+    if cfg.Linter == nil {
+        cfg.Linter = lintconfig.DefaultConfig()
+    }
+    return cfg
 }
 
 func validConfig(cfg *config.Config) bool {
