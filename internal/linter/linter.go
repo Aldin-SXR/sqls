@@ -52,8 +52,8 @@ func (l *Linter) Lint(text string) ([]diagnostic.Diagnostic, error) {
     if err != nil {
         // If parsing fails completely, report a syntax error
         db.AddError(
-            token.Pos{Line: 1, Col: 1},
-            token.Pos{Line: 1, Col: 1},
+            token.Pos{Line: 0, Col: 0},
+            token.Pos{Line: 0, Col: 0},
             diagnostic.CodeSyntaxError,
             "Failed to parse SQL: "+err.Error(),
         )

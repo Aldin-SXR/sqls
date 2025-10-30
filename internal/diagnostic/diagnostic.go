@@ -138,9 +138,10 @@ func (db *DiagnosticBuilder) Build() []Diagnostic {
 
 // posToRange converts token positions to our Range type
 func posToRange(start, end token.Pos) Range {
+    // token.Pos in this project is already 0-based; LSP expects 0-based
     return Range{
-        Start: Position{Line: start.Line - 1, Character: start.Col - 1},
-        End:   Position{Line: end.Line - 1, Character: end.Col - 1},
+        Start: Position{Line: start.Line, Character: start.Col},
+        End:   Position{Line: end.Line, Character: end.Col},
     }
 }
 
@@ -177,4 +178,3 @@ func FormatError(code DiagnosticCode, args ...interface{}) string {
     }
     return fmt.Sprintf("%s: %v", code, args)
 }
-
