@@ -44,10 +44,14 @@ func (v *ColumnValidator) Validate(text string, db *diagnostic.DiagnosticBuilder
     tables := v.extractTables(parsed, aliasMap)
     ctx := v.buildColumnContext(tables)
 
-    // Validate qualified column references (t.col)
+    // Validate qualified column references (t.col and t.*)
     walk(parsed, func(n ast.Node) {
         m, ok := n.(*ast.MemberIdentifier)
         if !ok || m.ChildIdent == nil {
+            return
+        }
+        // Allow wildcard expansion like alias.*
+        if m.ChildIdent.IsWildcard() || m.ChildIdent.NoQuoteString() == "*" {
             return
         }
         // Parent might be alias or table name
@@ -162,6 +166,42 @@ func (v *ColumnValidator) Validate(text string, db *diagnostic.DiagnosticBuilder
             }
         })
     }
+
+    // 3) ON clause comparisons: validate unqualified identifiers similarly
+    walk(parsed, func(n ast.Node) {
+        if comp, ok := n.(*ast.Comparison); ok {
+            walk(comp, func(x ast.Node) {
+                if id, ok := x.(*ast.Identifier); ok {
+                    name := id.NoQuoteString()
+                    if name == "" || id.IsWildcard() {
+                        return
+                    }
+                    if _, ok := aliasMap[strings.ToLower(name)]; ok {
+                        return
+                    }
+                    if _, existsInAny := ctx.AllColumns[name]; !existsInAny {
+                        if len(ctx.TableColumns) > 0 && v.looksLikeColumnReference(id) {
+                            db.AddError(id.Pos(), id.End(), diagnostic.CodeColumnNotFound, fmt.Sprintf("Column '%s' not found in any referenced table", name))
+                        }
+                        return
+                    }
+                    if cols := ctx.AllColumns[name]; len(cols) > 1 && v.config.WarnOnAmbiguousColumn {
+                        seen := map[string]bool{}
+                        unique := []string{}
+                        for _, c := range cols {
+                            if !seen[c.Table] {
+                                seen[c.Table] = true
+                                unique = append(unique, c.Table)
+                            }
+                        }
+                        if len(unique) > 1 {
+                            db.AddWarning(id.Pos(), id.End(), diagnostic.CodeAmbiguousColumn, diagnostic.FormatError(diagnostic.CodeAmbiguousColumn, name, strings.Join(unique, ", ")))
+                        }
+                    }
+                }
+            })
+        }
+    })
 }
 
 // ColumnContext holds information about columns available in the query

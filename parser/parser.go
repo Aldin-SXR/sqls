@@ -481,18 +481,23 @@ var aliasRecursionMatcher = astutil.NodeMatcher{
 }
 
 func parseAliasedWithoutAs(reader *astutil.NodeReader) ast.Node {
-	if !reader.PeekNodeIs(true, aliasRightMatcher) {
-		return reader.CurNode
-	}
+    if !reader.PeekNodeIs(true, aliasRightMatcher) {
+        return reader.CurNode
+    }
 
-	startIndex := reader.Index - 1
-	realName := reader.CurNode
-	endIndex, aliasedName := reader.PeekNode(true)
-	reader.NextNode(true)
+    startIndex := reader.Index - 1
+    realName := reader.CurNode
+    endIndex, aliasedName := reader.PeekNode(true)
+    // Heuristic: avoid treating start of a new line as alias (e.g., typing JOIN on next line)
+    // Only create alias without AS when the alias is on the same line as the real name.
+    if aliasedName.Pos().Line != realName.End().Line {
+        return reader.CurNode
+    }
+    reader.NextNode(true)
 
-	return &ast.Aliased{
-		Toks:        reader.NodesWithRange(startIndex, endIndex+1),
-		RealName:    realName,
+    return &ast.Aliased{
+        Toks:        reader.NodesWithRange(startIndex, endIndex+1),
+        RealName:    realName,
 		AliasedName: aliasedName,
 		IsAs:        false,
 	}
