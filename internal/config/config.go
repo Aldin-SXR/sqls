@@ -1,14 +1,15 @@
 package config
 
 import (
-	"errors"
-	"fmt"
-	"io"
-	"os"
-	"path/filepath"
+    "errors"
+    "fmt"
+    "io"
+    "os"
+    "path/filepath"
 
-	"github.com/sqls-server/sqls/internal/database"
-	"gopkg.in/yaml.v2"
+    "github.com/sqls-server/sqls/internal/database"
+    "github.com/sqls-server/sqls/internal/lintconfig"
+    "gopkg.in/yaml.v2"
 )
 
 var (
@@ -20,8 +21,9 @@ var (
 )
 
 type Config struct {
-	LowercaseKeywords bool                 `json:"lowercaseKeywords" yaml:"lowercaseKeywords"`
-	Connections       []*database.DBConfig `json:"connections" yaml:"connections"`
+    LowercaseKeywords bool                 `json:"lowercaseKeywords" yaml:"lowercaseKeywords"`
+    Connections       []*database.DBConfig `json:"connections" yaml:"connections"`
+    Linter            *lintconfig.Config   `json:"linter" yaml:"linter"`
 }
 
 func (c *Config) Validate() error {
@@ -32,9 +34,10 @@ func (c *Config) Validate() error {
 }
 
 func NewConfig() *Config {
-	cfg := &Config{}
-	cfg.LowercaseKeywords = false
-	return cfg
+    cfg := &Config{}
+    cfg.LowercaseKeywords = false
+    cfg.Linter = lintconfig.DefaultConfig()
+    return cfg
 }
 
 func GetDefaultConfig() (*Config, error) {

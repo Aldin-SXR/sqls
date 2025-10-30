@@ -1,18 +1,20 @@
 package handler
 
 import (
-	"context"
-	"encoding/json"
-	"errors"
-	"fmt"
-	"log"
-	"runtime"
+    "context"
+    "encoding/json"
+    "errors"
+    "fmt"
+    "log"
+    "runtime"
 
-	"github.com/sourcegraph/jsonrpc2"
+    "github.com/sourcegraph/jsonrpc2"
 
-	"github.com/sqls-server/sqls/internal/config"
-	"github.com/sqls-server/sqls/internal/database"
-	"github.com/sqls-server/sqls/internal/lsp"
+    "github.com/sqls-server/sqls/internal/config"
+    "github.com/sqls-server/sqls/internal/database"
+    // lintconfig used indirectly via diagnostics setup
+    "github.com/sqls-server/sqls/internal/linter"
+    "github.com/sqls-server/sqls/internal/lsp"
 )
 
 var (
@@ -38,6 +40,7 @@ type Server struct {
 
 	worker *database.Worker
 	files  map[string]*File
+    linter *linter.Linter
 }
 
 type File struct {
@@ -145,12 +148,12 @@ func (s *Server) handleInitialize(ctx context.Context, conn *jsonrpc2.Conn, req 
 		return nil, err
 	}
 
-	result = lsp.InitializeResult{
-		Capabilities: lsp.ServerCapabilities{
-			TextDocumentSync:   lsp.TDSKFull,
-			HoverProvider:      true,
-			CodeActionProvider: true,
-			CompletionProvider: &lsp.CompletionOptions{
+    result = lsp.InitializeResult{
+        Capabilities: lsp.ServerCapabilities{
+            TextDocumentSync:   lsp.TDSKFull,
+            HoverProvider:      true,
+            CodeActionProvider: true,
+            CompletionProvider: &lsp.CompletionOptions{
 				TriggerCharacters: []string{"(", "."},
 			},
 			SignatureHelpProvider: &lsp.SignatureHelpOptions{
@@ -167,7 +170,7 @@ func (s *Server) handleInitialize(ctx context.Context, conn *jsonrpc2.Conn, req 
 		},
 	}
 
-	s.initOptionDBConfig = params.InitializationOptions.ConnectionConfig
+    s.initOptionDBConfig = params.InitializationOptions.ConnectionConfig
 
 	// Initialize database database connection
 	// NOTE: If no connection is found at this point, it is possible that the connection settings are sent to workspace config, so don't make an error
@@ -219,6 +222,12 @@ func (s *Server) handleTextDocumentDidOpen(ctx context.Context, conn *jsonrpc2.C
 	if err := s.updateFile(params.TextDocument.URI, params.TextDocument.Text); err != nil {
 		return nil, err
 	}
+
+	// Lint the document
+	if err := s.lintDocument(ctx, conn, params.TextDocument.URI); err != nil {
+		log.Printf("failed to lint document: %v", err)
+	}
+
 	return nil, nil
 }
 
@@ -235,6 +244,15 @@ func (s *Server) handleTextDocumentDidChange(ctx context.Context, conn *jsonrpc2
 	if err := s.updateFile(params.TextDocument.URI, params.ContentChanges[0].Text); err != nil {
 		return nil, err
 	}
+
+	// Lint the document if linting on change is enabled
+	cfg := s.getConfig()
+	if cfg != nil && cfg.Linter != nil && cfg.Linter.LintOnChange {
+		if err := s.lintDocument(ctx, conn, params.TextDocument.URI); err != nil {
+			log.Printf("failed to lint document: %v", err)
+		}
+	}
+
 	return nil, nil
 }
 
@@ -256,6 +274,15 @@ func (s *Server) handleTextDocumentDidSave(ctx context.Context, conn *jsonrpc2.C
 	if err != nil {
 		return nil, err
 	}
+
+	// Lint the document if linting on save is enabled
+	cfg := s.getConfig()
+	if cfg != nil && cfg.Linter != nil && cfg.Linter.LintOnSave {
+		if err := s.lintDocument(ctx, conn, params.TextDocument.URI); err != nil {
+			log.Printf("failed to lint document: %v", err)
+		}
+	}
+
 	return nil, nil
 }
 
@@ -267,6 +294,11 @@ func (s *Server) handleTextDocumentDidClose(ctx context.Context, conn *jsonrpc2.
 	var params lsp.DidCloseTextDocumentParams
 	if err := json.Unmarshal(*req.Params, &params); err != nil {
 		return nil, err
+	}
+
+	// Clear diagnostics before closing the file
+	if err := s.clearDiagnostics(ctx, conn, params.TextDocument.URI); err != nil {
+		log.Printf("failed to clear diagnostics: %v", err)
 	}
 
 	if err := s.closeFile(params.TextDocument.URI); err != nil {
