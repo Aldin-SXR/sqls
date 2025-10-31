@@ -65,17 +65,23 @@ func (v *ColumnValidator) Validate(text string, db *diagnostic.DiagnosticBuilder
         if t, ok := aliasMap[strings.ToLower(parentName)]; ok {
             tableName = t
         }
-        // Fetch columns for table, search default then all schemas
-        cols, ok := v.dbCache.ColumnDescs(tableName)
+
+        // Look up columns from context (uses case-insensitive keys)
+        cols, ok := ctx.TableColumns[strings.ToLower(tableName)]
         if !ok {
-            // search all schemas
-            for _, schema := range v.dbCache.SortedSchemas() {
-                if c, ok2 := v.dbCache.ColumnDatabase(schema, tableName); ok2 {
-                    cols, ok = c, true
-                    break
+            // Try looking up from cache as fallback
+            cols, ok = v.dbCache.ColumnDescs(tableName)
+            if !ok {
+                // search all schemas
+                for _, schema := range v.dbCache.SortedSchemas() {
+                    if c, ok2 := v.dbCache.ColumnDatabase(schema, tableName); ok2 {
+                        cols, ok = c, true
+                        break
+                    }
                 }
             }
         }
+
         if !ok || len(cols) == 0 {
             // If we can't find the table, don't report column errors
             return
@@ -170,40 +176,76 @@ func (v *ColumnValidator) Validate(text string, db *diagnostic.DiagnosticBuilder
         })
     }
 
-    // 3) ON clause comparisons: validate unqualified identifiers similarly
+    // 3) Validate standalone unqualified identifiers in the entire query
+    // This catches identifiers in ON clauses, ORDER BY, etc. that aren't in SELECT/WHERE
+    // We need to skip identifiers that are part of MemberIdentifier nodes (qualified references)
+    memberIdentifiers := make(map[*ast.Identifier]bool)
+
+    // First, collect all identifiers that are part of MemberIdentifier nodes
     walk(parsed, func(n ast.Node) {
-        if comp, ok := n.(*ast.Comparison); ok {
-            walk(comp, func(x ast.Node) {
-                if id, ok := x.(*ast.Identifier); ok {
-                    name := id.NoQuoteString()
-                    if name == "" || id.IsWildcard() {
-                        return
-                    }
-                    if _, ok := aliasMap[strings.ToLower(name)]; ok {
-                        return
-                    }
-                    nameLower := strings.ToLower(name)
-                    if _, existsInAny := ctx.AllColumns[nameLower]; !existsInAny {
-                        if len(ctx.TableColumns) > 0 && v.looksLikeColumnReference(id) {
-                            db.AddError(id.Pos(), id.End(), diagnostic.CodeColumnNotFound, fmt.Sprintf("Column '%s' not found in any referenced table", name))
-                        }
-                        return
-                    }
-                    if cols := ctx.AllColumns[nameLower]; len(cols) > 1 && v.config.WarnOnAmbiguousColumn {
-                        seen := map[string]bool{}
-                        unique := []string{}
-                        for _, c := range cols {
-                            if !seen[c.Table] {
-                                seen[c.Table] = true
-                                unique = append(unique, c.Table)
-                            }
-                        }
-                        if len(unique) > 1 {
-                            db.AddWarning(id.Pos(), id.End(), diagnostic.CodeAmbiguousColumn, diagnostic.FormatError(diagnostic.CodeAmbiguousColumn, name, strings.Join(unique, ", ")))
-                        }
-                    }
+        if m, ok := n.(*ast.MemberIdentifier); ok {
+            if m.ParentIdent != nil {
+                memberIdentifiers[m.ParentIdent] = true // Mark parent (table/alias name)
+            }
+            if m.ChildIdent != nil {
+                memberIdentifiers[m.ChildIdent] = true // Mark child (column name)
+            }
+        }
+    })
+
+    // Now validate identifiers that are NOT part of qualified references
+    walk(parsed, func(n ast.Node) {
+        id, ok := n.(*ast.Identifier)
+        if !ok {
+            return
+        }
+
+        // Skip if this identifier is part of a MemberIdentifier (qualified reference)
+        if memberIdentifiers[id] {
+            return
+        }
+
+        name := id.NoQuoteString()
+        if name == "" || id.IsWildcard() {
+            return
+        }
+
+        // Skip if it's a table alias or table name
+        if _, ok := aliasMap[strings.ToLower(name)]; ok {
+            return
+        }
+
+        // Check if it's a known table name (to avoid false positives)
+        for _, tableInfo := range tables {
+            if strings.EqualFold(tableInfo.Name, name) {
+                return // It's a table name, not a column
+            }
+        }
+
+        nameLower := strings.ToLower(name)
+
+        // Check if column exists
+        if _, existsInAny := ctx.AllColumns[nameLower]; !existsInAny {
+            // Only report if we have tables and it looks like a column reference
+            if len(ctx.TableColumns) > 0 && v.looksLikeColumnReference(id) {
+                db.AddError(id.Pos(), id.End(), diagnostic.CodeColumnNotFound, fmt.Sprintf("Column '%s' not found in any referenced table", name))
+            }
+            return
+        }
+
+        // Ambiguity check - only for unqualified references
+        if cols := ctx.AllColumns[nameLower]; len(cols) > 1 && v.config.WarnOnAmbiguousColumn {
+            seen := map[string]bool{}
+            unique := []string{}
+            for _, c := range cols {
+                if !seen[c.Table] {
+                    seen[c.Table] = true
+                    unique = append(unique, c.Table)
                 }
-            })
+            }
+            if len(unique) > 1 {
+                db.AddWarning(id.Pos(), id.End(), diagnostic.CodeAmbiguousColumn, diagnostic.FormatError(diagnostic.CodeAmbiguousColumn, name, strings.Join(unique, ", ")))
+            }
         }
     })
 }
@@ -248,13 +290,16 @@ func (v *ColumnValidator) buildColumnContext(tables []*parseutil.TableInfo) *Col
 		}
 
 		if ok && len(cols) > 0 {
-			// Store by table name for lookup
-			context.TableColumns[tableName] = cols
+			// Store by table name for lookup (case-insensitive key)
+			context.TableColumns[strings.ToLower(tableName)] = cols
 
 			// Register alias (case-insensitive storage already handled in aliasMap)
 			if alias != "" {
 				context.TableAliases[strings.ToLower(alias)] = tableName
 			}
+
+			// Also register the table name itself as a valid reference
+			context.TableAliases[strings.ToLower(tableName)] = tableName
 
 			// Add to all columns map for ambiguity checking
 			for _, col := range cols {
