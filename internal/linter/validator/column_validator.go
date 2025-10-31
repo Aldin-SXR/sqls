@@ -210,24 +210,34 @@ func (v *ColumnValidator) Validate(text string, db *diagnostic.DiagnosticBuilder
             return
         }
 
-        // Skip if it's a table alias or table name
+        // Skip if it's a table alias (but NOT a table name - see below)
         if _, ok := aliasMap[strings.ToLower(name)]; ok {
             return
-        }
-
-        // Check if it's a known table name (to avoid false positives)
-        for _, tableInfo := range tables {
-            if strings.EqualFold(tableInfo.Name, name) {
-                return // It's a table name, not a column
-            }
         }
 
         nameLower := strings.ToLower(name)
 
         // Check if column exists
         if _, existsInAny := ctx.AllColumns[nameLower]; !existsInAny {
-            // Only report if we have tables and it looks like a column reference
-            if len(ctx.TableColumns) > 0 && v.looksLikeColumnReference(id) {
+            // Check if it's a known table name used incorrectly as a column
+            isTableName := false
+            for _, tableInfo := range tables {
+                if strings.EqualFold(tableInfo.Name, name) {
+                    isTableName = true
+                    break
+                }
+            }
+
+            if isTableName {
+                // Error: table name used where column expected
+                db.AddError(
+                    id.Pos(),
+                    id.End(),
+                    diagnostic.CodeColumnNotFound,
+                    fmt.Sprintf("'%s' is a table name, not a column. Did you mean '%s.column_name'?", name, name),
+                )
+            } else if len(ctx.TableColumns) > 0 && v.looksLikeColumnReference(id) {
+                // Regular column not found error
                 db.AddError(id.Pos(), id.End(), diagnostic.CodeColumnNotFound, fmt.Sprintf("Column '%s' not found in any referenced table", name))
             }
             return
