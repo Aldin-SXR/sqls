@@ -132,11 +132,7 @@ func (v *ColumnValidator) Validate(text string, db *diagnostic.DiagnosticBuilder
         if !ok || m.ChildIdent == nil {
             return
         }
-        // Allow wildcard expansion like alias.* or table.*
-        colName := m.ChildIdent.NoQuoteString()
-        if m.ChildIdent.IsWildcard() || colName == "*" || colName == "" {
-            return
-        }
+
         // Parent might be alias or table name
         parent := m.ParentIdent
         if parent == nil {
@@ -144,8 +140,42 @@ func (v *ColumnValidator) Validate(text string, db *diagnostic.DiagnosticBuilder
         }
         parentName := parent.NoQuoteString()
         tableName := parentName
+        isValidAlias := false
         if t, ok := aliasMap[strings.ToLower(parentName)]; ok {
             tableName = t
+            isValidAlias = true
+        }
+
+        // Check if parentName references a valid table/alias from the query
+        // If it's not an alias, check if it's a table name in the context
+        if !isValidAlias {
+            _, foundInContext := ctx.TableColumns[strings.ToLower(parentName)]
+            if !foundInContext {
+                // Check if it's a valid table name from the tables list
+                isValidTable := false
+                for _, tableInfo := range tables {
+                    if strings.EqualFold(tableInfo.Name, parentName) || strings.EqualFold(tableInfo.Alias, parentName) {
+                        isValidTable = true
+                        break
+                    }
+                }
+                if !isValidTable {
+                    // Invalid table/alias reference
+                    db.AddError(
+                        parent.Pos(),
+                        parent.End(),
+                        diagnostic.CodeTableNotFound,
+                        fmt.Sprintf("Table or alias '%s' not found in query", parentName),
+                    )
+                    return
+                }
+            }
+        }
+
+        // Allow wildcard expansion like alias.* or table.*
+        colName := m.ChildIdent.NoQuoteString()
+        if m.ChildIdent.IsWildcard() || colName == "*" || colName == "" {
+            return
         }
 
         // Look up columns from context (uses case-insensitive keys)
@@ -165,7 +195,8 @@ func (v *ColumnValidator) Validate(text string, db *diagnostic.DiagnosticBuilder
         }
 
         if !ok || len(cols) == 0 {
-            // If we can't find the table, don't report column errors
+            // If we can't find the table columns, don't report column errors
+            // (the table exists in the query but we don't have schema info)
             return
         }
         found := false
