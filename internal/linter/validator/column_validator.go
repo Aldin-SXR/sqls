@@ -44,6 +44,20 @@ func (v *ColumnValidator) Validate(text string, db *diagnostic.DiagnosticBuilder
     tables := v.extractTables(parsed, aliasMap)
     ctx := v.buildColumnContext(tables)
 
+    // FIRST: Collect all identifiers that are part of MemberIdentifier nodes (qualified references)
+    // This prevents us from validating "customers" in "customers.id" as a standalone column
+    memberIdentifiers := make(map[*ast.Identifier]bool)
+    walk(parsed, func(n ast.Node) {
+        if m, ok := n.(*ast.MemberIdentifier); ok {
+            if m.ParentIdent != nil {
+                memberIdentifiers[m.ParentIdent] = true // Mark parent (table/alias name)
+            }
+            if m.ChildIdent != nil {
+                memberIdentifiers[m.ChildIdent] = true // Mark child (column name)
+            }
+        }
+    })
+
     // Validate qualified column references (t.col and t.*)
     walk(parsed, func(n ast.Node) {
         m, ok := n.(*ast.MemberIdentifier)
@@ -108,6 +122,11 @@ func (v *ColumnValidator) Validate(text string, db *diagnostic.DiagnosticBuilder
     for _, node := range parseutil.ExtractSelectExpr(parsed) {
         walk(node, func(n ast.Node) {
             if id, ok := n.(*ast.Identifier); ok {
+                // Skip if this identifier is part of a MemberIdentifier (qualified reference)
+                if memberIdentifiers[id] {
+                    return
+                }
+
                 name := id.NoQuoteString()
                 if name == "" || id.IsWildcard() {
                     return
@@ -145,6 +164,11 @@ func (v *ColumnValidator) Validate(text string, db *diagnostic.DiagnosticBuilder
     for _, node := range parseutil.ExtractWhereCondition(parsed) {
         walk(node, func(n ast.Node) {
             if id, ok := n.(*ast.Identifier); ok {
+                // Skip if this identifier is part of a MemberIdentifier (qualified reference)
+                if memberIdentifiers[id] {
+                    return
+                }
+
                 name := id.NoQuoteString()
                 if name == "" || id.IsWildcard() {
                     return
@@ -178,22 +202,7 @@ func (v *ColumnValidator) Validate(text string, db *diagnostic.DiagnosticBuilder
 
     // 3) Validate standalone unqualified identifiers in the entire query
     // This catches identifiers in ON clauses, ORDER BY, etc. that aren't in SELECT/WHERE
-    // We need to skip identifiers that are part of MemberIdentifier nodes (qualified references)
-    memberIdentifiers := make(map[*ast.Identifier]bool)
-
-    // First, collect all identifiers that are part of MemberIdentifier nodes
-    walk(parsed, func(n ast.Node) {
-        if m, ok := n.(*ast.MemberIdentifier); ok {
-            if m.ParentIdent != nil {
-                memberIdentifiers[m.ParentIdent] = true // Mark parent (table/alias name)
-            }
-            if m.ChildIdent != nil {
-                memberIdentifiers[m.ChildIdent] = true // Mark child (column name)
-            }
-        }
-    })
-
-    // Now validate identifiers that are NOT part of qualified references
+    // memberIdentifiers already collected above, so just validate remaining identifiers
     walk(parsed, func(n ast.Node) {
         id, ok := n.(*ast.Identifier)
         if !ok {
