@@ -17,13 +17,15 @@ import (
 type ColumnValidator struct {
     config  *lintconfig.Config
     dbCache *database.DBCache
+    driver  string // Database driver (e.g., "mysql", "postgresql")
 }
 
 // NewColumnValidator creates a new column validator
-func NewColumnValidator(config *lintconfig.Config, dbCache *database.DBCache) *ColumnValidator {
+func NewColumnValidator(config *lintconfig.Config, dbCache *database.DBCache, driver string) *ColumnValidator {
 	return &ColumnValidator{
 		config:  config,
 		dbCache: dbCache,
+		driver:  driver,
 	}
 }
 
@@ -107,6 +109,22 @@ func (v *ColumnValidator) Validate(text string, db *diagnostic.DiagnosticBuilder
     for _, node := range parseutil.ExtractTableFactor(parsed) {
         collectTableRefPositions(node)
     }
+
+    // Collect alias names from Aliased nodes (e.g., "SELECT col AS alias_name")
+    // The alias names themselves should not be validated as column references
+    walk(parsed, func(n ast.Node) {
+        if aliased, ok := n.(*ast.Aliased); ok {
+            if aliased.AliasedName != nil {
+                // Walk the aliased name to find all identifiers within it
+                walk(aliased.AliasedName, func(aliasNode ast.Node) {
+                    if id, ok := aliasNode.(*ast.Identifier); ok {
+                        pos := fmt.Sprintf("%d:%d", id.Pos().Line, id.Pos().Col)
+                        skipIdentifierPositions[pos] = true
+                    }
+                })
+            }
+        }
+    })
 
     // Validate qualified column references (t.col and t.*)
     walk(parsed, func(n ast.Node) {
@@ -277,8 +295,8 @@ func (v *ColumnValidator) Validate(text string, db *diagnostic.DiagnosticBuilder
             return
         }
 
-        // Skip string literals (single-quoted strings)
-        if id.GetToken() != nil && id.GetToken().MatchKind(token.SingleQuotedString) {
+        // Skip string literals (single or double-quoted strings)
+        if v.isStringLiteral(id) {
             return
         }
 
@@ -511,19 +529,32 @@ func (v *ColumnValidator) isStringLiteral(ident *ast.Identifier) bool {
 		return false
 	}
 
-	// Check if it's a single-quoted string
+	// Check if it's a single-quoted string (standard SQL string literal)
 	if ident.GetToken().MatchKind(token.SingleQuotedString) {
 		return true
 	}
 
-	// For MySQL, double quotes can also be string literals
 	// Check the raw string representation
 	raw := ident.GetToken().String()
-	if len(raw) >= 2 && (raw[0] == '"' || raw[0] == '\'') {
-		return true
+	if len(raw) >= 2 {
+		// Single quotes are always string literals
+		if raw[0] == '\'' {
+			return true
+		}
+
+		// Double quotes are string literals only in MySQL
+		// In other SQL dialects (PostgreSQL, Oracle, etc.), double quotes denote identifiers
+		if raw[0] == '"' && v.isMySQLDriver() {
+			return true
+		}
 	}
 
 	return false
+}
+
+// isMySQLDriver checks if the current driver is MySQL
+func (v *ColumnValidator) isMySQLDriver() bool {
+	return v.driver == "mysql" || v.driver == "mysql8" || v.driver == "mysql57" || v.driver == "mysql56"
 }
 
 // checkAmbiguousColumns checks for ambiguous column references

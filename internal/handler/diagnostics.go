@@ -85,7 +85,13 @@ func (s *Server) initializeLinter() {
         dbCache = s.worker.Cache()
     }
 
-	s.linter = linter.New(linterCfg, dbCache, dialectObj)
+    // Get database driver
+    var driver string
+    if s.curDBCfg != nil {
+        driver = string(s.curDBCfg.Driver)
+    }
+
+	s.linter = linter.New(linterCfg, dbCache, dialectObj, driver)
 }
 
 // clearDiagnostics clears diagnostics for a document

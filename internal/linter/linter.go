@@ -16,6 +16,7 @@ type Linter struct {
     config           *lintconfig.Config
     dbCache          *database.DBCache
     dialect          dialect.Dialect
+    driver           string // Database driver string (e.g., "mysql", "postgresql")
     syntaxValidator  *validator.SyntaxValidator
     tableValidator   *validator.TableValidator
     columnValidator  *validator.ColumnValidator
@@ -23,7 +24,7 @@ type Linter struct {
 }
 
 // New creates a new linter instance
-func New(config *lintconfig.Config, dbCache *database.DBCache, dialect dialect.Dialect) *Linter {
+func New(config *lintconfig.Config, dbCache *database.DBCache, dialect dialect.Dialect, driver string) *Linter {
     if config == nil {
         config = lintconfig.DefaultConfig()
     }
@@ -32,9 +33,10 @@ func New(config *lintconfig.Config, dbCache *database.DBCache, dialect dialect.D
         config:          config,
         dbCache:         dbCache,
         dialect:         dialect,
+        driver:          driver,
         syntaxValidator: validator.NewSyntaxValidator(config),
         tableValidator:  validator.NewTableValidator(config, dbCache),
-        columnValidator: validator.NewColumnValidator(config, dbCache),
+        columnValidator: validator.NewColumnValidator(config, dbCache, driver),
         styleValidator:  validator.NewStyleValidator(config, dialect),
     }
 }
@@ -114,7 +116,7 @@ func (l *Linter) UpdateConfig(config *lintconfig.Config) {
     l.config = config
     l.syntaxValidator = validator.NewSyntaxValidator(config)
     l.tableValidator = validator.NewTableValidator(config, l.dbCache)
-    l.columnValidator = validator.NewColumnValidator(config, l.dbCache)
+    l.columnValidator = validator.NewColumnValidator(config, l.dbCache, l.driver)
     l.styleValidator = validator.NewStyleValidator(config, l.dialect)
 }
 
@@ -122,7 +124,7 @@ func (l *Linter) UpdateConfig(config *lintconfig.Config) {
 func (l *Linter) UpdateDBCache(dbCache *database.DBCache) {
     l.dbCache = dbCache
     l.tableValidator = validator.NewTableValidator(l.config, dbCache)
-    l.columnValidator = validator.NewColumnValidator(l.config, dbCache)
+    l.columnValidator = validator.NewColumnValidator(l.config, dbCache, l.driver)
 }
 
 // UpdateDialect updates the SQL dialect
