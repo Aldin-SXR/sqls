@@ -10,6 +10,7 @@ import (
     "github.com/sqls-server/sqls/internal/lintconfig"
     "github.com/sqls-server/sqls/parser"
     "github.com/sqls-server/sqls/parser/parseutil"
+    "github.com/sqls-server/sqls/token"
 )
 
 // ColumnValidator validates column references
@@ -44,22 +45,68 @@ func (v *ColumnValidator) Validate(text string, db *diagnostic.DiagnosticBuilder
     tables := v.extractTables(parsed, aliasMap)
     ctx := v.buildColumnContext(tables)
 
-    // FIRST: Collect all identifiers that are part of MemberIdentifier nodes (qualified references)
-    // This prevents us from validating "customers" in "customers.id" as a standalone column
+    // FIRST: Collect all identifiers that should be skipped from column validation
+    // This includes:
+    // 1. Identifiers that are part of MemberIdentifier nodes (qualified references like "customers.id")
+    // 2. Identifiers that are table references (FROM/JOIN clauses like "FROM customers")
     // Use position-based tracking instead of pointer comparison to avoid instance mismatch issues
-    memberIdentifierPositions := make(map[string]bool)
+    skipIdentifierPositions := make(map[string]bool)
+
+    // Collect MemberIdentifier components
     walk(parsed, func(n ast.Node) {
         if m, ok := n.(*ast.MemberIdentifier); ok {
             if m.ParentIdent != nil {
                 pos := fmt.Sprintf("%d:%d", m.ParentIdent.Pos().Line, m.ParentIdent.Pos().Col)
-                memberIdentifierPositions[pos] = true // Mark parent (table/alias name)
+                skipIdentifierPositions[pos] = true // Mark parent (table/alias name)
             }
             if m.ChildIdent != nil {
                 pos := fmt.Sprintf("%d:%d", m.ChildIdent.Pos().Line, m.ChildIdent.Pos().Col)
-                memberIdentifierPositions[pos] = true // Mark child (column name)
+                skipIdentifierPositions[pos] = true // Mark child (column name)
             }
         }
     })
+
+    // Collect table reference identifiers (FROM/JOIN clauses)
+    var collectTableRefPositions func(ast.Node)
+    collectTableRefPositions = func(n ast.Node) {
+        if n == nil {
+            return
+        }
+        switch t := n.(type) {
+        case *ast.Identifier:
+            pos := fmt.Sprintf("%d:%d", t.Pos().Line, t.Pos().Col)
+            skipIdentifierPositions[pos] = true
+        case *ast.MemberIdentifier:
+            // Schema.table references
+            if t.ChildIdent != nil {
+                pos := fmt.Sprintf("%d:%d", t.ChildIdent.Pos().Line, t.ChildIdent.Pos().Col)
+                skipIdentifierPositions[pos] = true
+            }
+            if t.ParentIdent != nil {
+                pos := fmt.Sprintf("%d:%d", t.ParentIdent.Pos().Line, t.ParentIdent.Pos().Col)
+                skipIdentifierPositions[pos] = true
+            }
+        case *ast.Aliased:
+            // Table aliases: "FROM customers AS c" - skip both "customers" and position of alias itself
+            collectTableRefPositions(t.RealName)
+        case *ast.IdentifierList:
+            // Multiple table references: "FROM table1, table2" or JOIN chains
+            for _, id := range t.GetIdentifiers() {
+                collectTableRefPositions(id)
+            }
+        }
+    }
+
+    // Collect from all table reference extraction points
+    for _, node := range parseutil.ExtractTableReferences(parsed) {
+        collectTableRefPositions(node)
+    }
+    for _, node := range parseutil.ExtractTableReference(parsed) {
+        collectTableRefPositions(node)
+    }
+    for _, node := range parseutil.ExtractTableFactor(parsed) {
+        collectTableRefPositions(node)
+    }
 
     // Validate qualified column references (t.col and t.*)
     walk(parsed, func(n ast.Node) {
@@ -125,9 +172,14 @@ func (v *ColumnValidator) Validate(text string, db *diagnostic.DiagnosticBuilder
     for _, node := range parseutil.ExtractSelectExpr(parsed) {
         walk(node, func(n ast.Node) {
             if id, ok := n.(*ast.Identifier); ok {
-                // Skip if this identifier is part of a MemberIdentifier (qualified reference)
+                // Skip if this identifier should not be validated as a column
                 idPos := fmt.Sprintf("%d:%d", id.Pos().Line, id.Pos().Col)
-                if memberIdentifierPositions[idPos] {
+                if skipIdentifierPositions[idPos] {
+                    return
+                }
+
+                // Skip string literals (single or double-quoted strings)
+                if v.isStringLiteral(id) {
                     return
                 }
 
@@ -168,9 +220,14 @@ func (v *ColumnValidator) Validate(text string, db *diagnostic.DiagnosticBuilder
     for _, node := range parseutil.ExtractWhereCondition(parsed) {
         walk(node, func(n ast.Node) {
             if id, ok := n.(*ast.Identifier); ok {
-                // Skip if this identifier is part of a MemberIdentifier (qualified reference)
+                // Skip if this identifier should not be validated as a column
                 idPos := fmt.Sprintf("%d:%d", id.Pos().Line, id.Pos().Col)
-                if memberIdentifierPositions[idPos] {
+                if skipIdentifierPositions[idPos] {
+                    return
+                }
+
+                // Skip string literals (single or double-quoted strings)
+                if v.isStringLiteral(id) {
                     return
                 }
 
@@ -207,16 +264,21 @@ func (v *ColumnValidator) Validate(text string, db *diagnostic.DiagnosticBuilder
 
     // 3) Validate standalone unqualified identifiers in the entire query
     // This catches identifiers in ON clauses, ORDER BY, etc. that aren't in SELECT/WHERE
-    // memberIdentifierPositions already collected above, so just validate remaining identifiers
+    // skipIdentifierPositions already collected above, so just validate remaining identifiers
     walk(parsed, func(n ast.Node) {
         id, ok := n.(*ast.Identifier)
         if !ok {
             return
         }
 
-        // Skip if this identifier is part of a MemberIdentifier (qualified reference)
+        // Skip if this identifier should not be validated as a column
         idPos := fmt.Sprintf("%d:%d", id.Pos().Line, id.Pos().Col)
-        if memberIdentifierPositions[idPos] {
+        if skipIdentifierPositions[idPos] {
+            return
+        }
+
+        // Skip string literals (single-quoted strings)
+        if id.GetToken() != nil && id.GetToken().MatchKind(token.SingleQuotedString) {
             return
         }
 
@@ -441,6 +503,27 @@ func (v *ColumnValidator) looksLikeColumnReference(ident *ast.Identifier) bool {
 	}
 
 	return true
+}
+
+// isStringLiteral determines if an identifier is actually a string literal
+func (v *ColumnValidator) isStringLiteral(ident *ast.Identifier) bool {
+	if ident.GetToken() == nil {
+		return false
+	}
+
+	// Check if it's a single-quoted string
+	if ident.GetToken().MatchKind(token.SingleQuotedString) {
+		return true
+	}
+
+	// For MySQL, double quotes can also be string literals
+	// Check the raw string representation
+	raw := ident.GetToken().String()
+	if len(raw) >= 2 && (raw[0] == '"' || raw[0] == '\'') {
+		return true
+	}
+
+	return false
 }
 
 // checkAmbiguousColumns checks for ambiguous column references
