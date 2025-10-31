@@ -46,14 +46,17 @@ func (v *ColumnValidator) Validate(text string, db *diagnostic.DiagnosticBuilder
 
     // FIRST: Collect all identifiers that are part of MemberIdentifier nodes (qualified references)
     // This prevents us from validating "customers" in "customers.id" as a standalone column
-    memberIdentifiers := make(map[*ast.Identifier]bool)
+    // Use position-based tracking instead of pointer comparison to avoid instance mismatch issues
+    memberIdentifierPositions := make(map[string]bool)
     walk(parsed, func(n ast.Node) {
         if m, ok := n.(*ast.MemberIdentifier); ok {
             if m.ParentIdent != nil {
-                memberIdentifiers[m.ParentIdent] = true // Mark parent (table/alias name)
+                pos := fmt.Sprintf("%d:%d", m.ParentIdent.Pos().Line, m.ParentIdent.Pos().Col)
+                memberIdentifierPositions[pos] = true // Mark parent (table/alias name)
             }
             if m.ChildIdent != nil {
-                memberIdentifiers[m.ChildIdent] = true // Mark child (column name)
+                pos := fmt.Sprintf("%d:%d", m.ChildIdent.Pos().Line, m.ChildIdent.Pos().Col)
+                memberIdentifierPositions[pos] = true // Mark child (column name)
             }
         }
     })
@@ -123,7 +126,8 @@ func (v *ColumnValidator) Validate(text string, db *diagnostic.DiagnosticBuilder
         walk(node, func(n ast.Node) {
             if id, ok := n.(*ast.Identifier); ok {
                 // Skip if this identifier is part of a MemberIdentifier (qualified reference)
-                if memberIdentifiers[id] {
+                idPos := fmt.Sprintf("%d:%d", id.Pos().Line, id.Pos().Col)
+                if memberIdentifierPositions[idPos] {
                     return
                 }
 
@@ -165,7 +169,8 @@ func (v *ColumnValidator) Validate(text string, db *diagnostic.DiagnosticBuilder
         walk(node, func(n ast.Node) {
             if id, ok := n.(*ast.Identifier); ok {
                 // Skip if this identifier is part of a MemberIdentifier (qualified reference)
-                if memberIdentifiers[id] {
+                idPos := fmt.Sprintf("%d:%d", id.Pos().Line, id.Pos().Col)
+                if memberIdentifierPositions[idPos] {
                     return
                 }
 
@@ -202,7 +207,7 @@ func (v *ColumnValidator) Validate(text string, db *diagnostic.DiagnosticBuilder
 
     // 3) Validate standalone unqualified identifiers in the entire query
     // This catches identifiers in ON clauses, ORDER BY, etc. that aren't in SELECT/WHERE
-    // memberIdentifiers already collected above, so just validate remaining identifiers
+    // memberIdentifierPositions already collected above, so just validate remaining identifiers
     walk(parsed, func(n ast.Node) {
         id, ok := n.(*ast.Identifier)
         if !ok {
@@ -210,7 +215,8 @@ func (v *ColumnValidator) Validate(text string, db *diagnostic.DiagnosticBuilder
         }
 
         // Skip if this identifier is part of a MemberIdentifier (qualified reference)
-        if memberIdentifiers[id] {
+        idPos := fmt.Sprintf("%d:%d", id.Pos().Line, id.Pos().Col)
+        if memberIdentifierPositions[idPos] {
             return
         }
 
