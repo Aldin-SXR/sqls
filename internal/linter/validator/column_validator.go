@@ -129,15 +129,40 @@ func (v *ColumnValidator) Validate(text string, db *diagnostic.DiagnosticBuilder
     // Validate qualified column references (t.col and t.*)
     walk(parsed, func(n ast.Node) {
         m, ok := n.(*ast.MemberIdentifier)
-        if !ok || m.ChildIdent == nil {
+        if !ok {
+            return
+        }
+
+        // Check for incomplete qualified references
+        if m.ChildIdent == nil && m.ParentIdent != nil {
+            // Case: "table." or "alias." - qualifier without column
+            db.AddError(
+                m.ParentIdent.Pos(),
+                m.End(),
+                diagnostic.CodeSyntaxError,
+                fmt.Sprintf("Incomplete qualified reference: expected column name after '%s.'", m.ParentIdent.NoQuoteString()),
+            )
+            return
+        }
+
+        if m.ChildIdent != nil && m.ParentIdent == nil {
+            // Case: ".column" - column without qualifier
+            db.AddError(
+                m.Pos(),
+                m.ChildIdent.End(),
+                diagnostic.CodeSyntaxError,
+                fmt.Sprintf("Incomplete qualified reference: expected table or alias name before '.%s'", m.ChildIdent.NoQuoteString()),
+            )
+            return
+        }
+
+        if m.ChildIdent == nil || m.ParentIdent == nil {
+            // Both are nil or some other edge case
             return
         }
 
         // Parent might be alias or table name
         parent := m.ParentIdent
-        if parent == nil {
-            return
-        }
         parentName := parent.NoQuoteString()
         tableName := parentName
         isValidAlias := false
