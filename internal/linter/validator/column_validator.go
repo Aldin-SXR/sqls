@@ -50,8 +50,9 @@ func (v *ColumnValidator) Validate(text string, db *diagnostic.DiagnosticBuilder
         if !ok || m.ChildIdent == nil {
             return
         }
-        // Allow wildcard expansion like alias.*
-        if m.ChildIdent.IsWildcard() || m.ChildIdent.NoQuoteString() == "*" {
+        // Allow wildcard expansion like alias.* or table.*
+        colName := m.ChildIdent.NoQuoteString()
+        if m.ChildIdent.IsWildcard() || colName == "*" || colName == "" {
             return
         }
         // Parent might be alias or table name
@@ -76,9 +77,9 @@ func (v *ColumnValidator) Validate(text string, db *diagnostic.DiagnosticBuilder
             }
         }
         if !ok || len(cols) == 0 {
+            // If we can't find the table, don't report column errors
             return
         }
-        colName := m.ChildIdent.NoQuoteString()
         found := false
         for _, c := range cols {
             if strings.EqualFold(c.Name, colName) {
@@ -109,14 +110,15 @@ func (v *ColumnValidator) Validate(text string, db *diagnostic.DiagnosticBuilder
                 if _, ok := aliasMap[strings.ToLower(name)]; ok {
                     return
                 }
-                if _, existsInAny := ctx.AllColumns[name]; !existsInAny {
+                nameLower := strings.ToLower(name)
+                if _, existsInAny := ctx.AllColumns[nameLower]; !existsInAny {
                     if len(ctx.TableColumns) > 0 && v.looksLikeColumnReference(id) {
                         db.AddError(id.Pos(), id.End(), diagnostic.CodeColumnNotFound, fmt.Sprintf("Column '%s' not found in any referenced table", name))
                     }
                     return
                 }
                 // Ambiguity check
-                if cols := ctx.AllColumns[name]; len(cols) > 1 && v.config.WarnOnAmbiguousColumn {
+                if cols := ctx.AllColumns[nameLower]; len(cols) > 1 && v.config.WarnOnAmbiguousColumn {
                     // Collect unique table names for message
                     seen := map[string]bool{}
                     unique := []string{}
@@ -144,13 +146,14 @@ func (v *ColumnValidator) Validate(text string, db *diagnostic.DiagnosticBuilder
                 if _, ok := aliasMap[strings.ToLower(name)]; ok {
                     return
                 }
-                if _, existsInAny := ctx.AllColumns[name]; !existsInAny {
+                nameLower := strings.ToLower(name)
+                if _, existsInAny := ctx.AllColumns[nameLower]; !existsInAny {
                     if len(ctx.TableColumns) > 0 && v.looksLikeColumnReference(id) {
                         db.AddError(id.Pos(), id.End(), diagnostic.CodeColumnNotFound, fmt.Sprintf("Column '%s' not found in any referenced table", name))
                     }
                     return
                 }
-                if cols := ctx.AllColumns[name]; len(cols) > 1 && v.config.WarnOnAmbiguousColumn {
+                if cols := ctx.AllColumns[nameLower]; len(cols) > 1 && v.config.WarnOnAmbiguousColumn {
                     seen := map[string]bool{}
                     unique := []string{}
                     for _, c := range cols {
@@ -179,13 +182,14 @@ func (v *ColumnValidator) Validate(text string, db *diagnostic.DiagnosticBuilder
                     if _, ok := aliasMap[strings.ToLower(name)]; ok {
                         return
                     }
-                    if _, existsInAny := ctx.AllColumns[name]; !existsInAny {
+                    nameLower := strings.ToLower(name)
+                    if _, existsInAny := ctx.AllColumns[nameLower]; !existsInAny {
                         if len(ctx.TableColumns) > 0 && v.looksLikeColumnReference(id) {
                             db.AddError(id.Pos(), id.End(), diagnostic.CodeColumnNotFound, fmt.Sprintf("Column '%s' not found in any referenced table", name))
                         }
                         return
                     }
-                    if cols := ctx.AllColumns[name]; len(cols) > 1 && v.config.WarnOnAmbiguousColumn {
+                    if cols := ctx.AllColumns[nameLower]; len(cols) > 1 && v.config.WarnOnAmbiguousColumn {
                         seen := map[string]bool{}
                         unique := []string{}
                         for _, c := range cols {
@@ -233,22 +237,32 @@ func (v *ColumnValidator) buildColumnContext(tables []*parseutil.TableInfo) *Col
 			fullName := tableInfo.DatabaseSchema + "." + tableName
 			cols, ok = v.dbCache.ColumnDescs(fullName)
 		}
+		// If still not found, search all schemas (important for JOIN tables)
+		if !ok {
+			for _, schema := range v.dbCache.SortedSchemas() {
+				if c, found := v.dbCache.ColumnDatabase(schema, tableName); found {
+					cols, ok = c, true
+					break
+				}
+			}
+		}
 
-		if ok {
+		if ok && len(cols) > 0 {
+			// Store by table name for lookup
 			context.TableColumns[tableName] = cols
 
-			// Register alias
+			// Register alias (case-insensitive storage already handled in aliasMap)
 			if alias != "" {
-				context.TableAliases[alias] = tableName
+				context.TableAliases[strings.ToLower(alias)] = tableName
 			}
 
 			// Add to all columns map for ambiguity checking
 			for _, col := range cols {
 				colName := col.Name
-				if existing, ok := context.AllColumns[colName]; ok {
-					context.AllColumns[colName] = append(existing, col)
+				if existing, ok := context.AllColumns[strings.ToLower(colName)]; ok {
+					context.AllColumns[strings.ToLower(colName)] = append(existing, col)
 				} else {
-					context.AllColumns[colName] = []*database.ColumnDesc{col}
+					context.AllColumns[strings.ToLower(colName)] = []*database.ColumnDesc{col}
 				}
 			}
 		}

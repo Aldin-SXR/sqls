@@ -59,6 +59,13 @@ func (v *TableValidator) validateTableReference(schemaName, tableName string, st
     if tableName == "" && schemaName == "" {
         return
     }
+
+    // Skip validation for very short identifiers that might be partial keywords being typed
+    // This prevents false positives when user is typing "JOIN", "WHERE", etc.
+    if len(tableName) <= 4 && v.mightBePartialKeyword(tableName) {
+        return
+    }
+
     // Validate schema first if present
     if schemaName != "" && !v.schemaExists(schemaName) {
         db.AddError(
@@ -77,6 +84,26 @@ func (v *TableValidator) validateTableReference(schemaName, tableName string, st
             diagnostic.FormatError(diagnostic.CodeTableNotFound, v.formatTableName(schemaName, tableName)),
         )
     }
+}
+
+// mightBePartialKeyword checks if a short string could be a partial SQL keyword
+func (v *TableValidator) mightBePartialKeyword(s string) bool {
+    // Common SQL keywords that users might be typing
+    keywords := []string{
+        "JOIN", "LEFT", "RIGHT", "INNER", "OUTER", "CROSS", "FULL",
+        "WHERE", "GROUP", "ORDER", "HAVING", "LIMIT", "OFFSET",
+        "UNION", "INTERSECT", "EXCEPT",
+        "AND", "OR", "NOT", "IN", "EXISTS", "LIKE", "BETWEEN",
+        "AS", "ON", "USING", "WITH",
+    }
+
+    upper := strings.ToUpper(s)
+    for _, kw := range keywords {
+        if strings.HasPrefix(kw, upper) {
+            return true
+        }
+    }
+    return false
 }
 
 // validateNodeAsTable dispatches based on node type and validates
