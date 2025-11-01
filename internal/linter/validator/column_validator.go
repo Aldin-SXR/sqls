@@ -55,15 +55,17 @@ func (v *ColumnValidator) Validate(text string, db *diagnostic.DiagnosticBuilder
     skipIdentifierPositions := make(map[string]bool)
 
     // Collect MemberIdentifier components
+    // Only add to skip list if it's a COMPLETE MemberIdentifier (both parent and child present)
+    // Incomplete ones (e.g., ".column" or "table.") should be validated as errors
     walk(parsed, func(n ast.Node) {
         if m, ok := n.(*ast.MemberIdentifier); ok {
-            if m.ParentIdent != nil {
+            // Only skip if BOTH parent and child are present (complete qualified reference)
+            if m.ParentIdent != nil && m.ChildIdent != nil {
                 pos := fmt.Sprintf("%d:%d", m.ParentIdent.Pos().Line, m.ParentIdent.Pos().Col)
                 skipIdentifierPositions[pos] = true // Mark parent (table/alias name)
-            }
-            if m.ChildIdent != nil {
-                pos := fmt.Sprintf("%d:%d", m.ChildIdent.Pos().Line, m.ChildIdent.Pos().Col)
-                skipIdentifierPositions[pos] = true // Mark child (column name)
+
+                childPos := fmt.Sprintf("%d:%d", m.ChildIdent.Pos().Line, m.ChildIdent.Pos().Col)
+                skipIdentifierPositions[childPos] = true // Mark child (column name)
             }
         }
     })
@@ -335,6 +337,45 @@ func (v *ColumnValidator) Validate(text string, db *diagnostic.DiagnosticBuilder
             }
         })
     }
+
+    // Check for orphaned period tokens (e.g., ".column_name" without table/alias)
+    // This catches cases where the parser doesn't create a MemberIdentifier
+    var checkForOrphanedPeriods func(ast.TokenList)
+    checkForOrphanedPeriods = func(nodes ast.TokenList) {
+        tokens := nodes.GetTokens()
+        for i := 0; i < len(tokens); i++ {
+            node := tokens[i]
+
+            // Check if this is a period/dot token
+            if tok, ok := node.(ast.Token); ok {
+                if tok.GetToken() != nil && tok.GetToken().Kind == token.Period {
+                    // Found a period token, check if there's an identifier after it
+                    if i+1 < len(tokens) {
+                        if nextIdent, ok := tokens[i+1].(*ast.Identifier); ok {
+                            // Check if this period+identifier is NOT part of a MemberIdentifier
+                            // by checking if the identifier is in skipIdentifierPositions
+                            nextPos := fmt.Sprintf("%d:%d", nextIdent.Pos().Line, nextIdent.Pos().Col)
+                            if !skipIdentifierPositions[nextPos] {
+                                // This is likely ".column_name" without a table/alias prefix
+                                db.AddError(
+                                    tok.Pos(),
+                                    nextIdent.End(),
+                                    diagnostic.CodeSyntaxError,
+                                    fmt.Sprintf("Incomplete qualified reference: expected table or alias name before '.%s'", nextIdent.NoQuoteString()),
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Recursively check nested token lists
+            if list, ok := node.(ast.TokenList); ok {
+                checkForOrphanedPeriods(list)
+            }
+        }
+    }
+    checkForOrphanedPeriods(parsed)
 
     // 3) Validate standalone unqualified identifiers in the entire query
     // This catches identifiers in ON clauses, ORDER BY, etc. that aren't in SELECT/WHERE
