@@ -5,6 +5,7 @@ import (
     "strings"
 
     "github.com/sqls-server/sqls/ast"
+    "github.com/sqls-server/sqls/dialect"
     "github.com/sqls-server/sqls/internal/database"
     "github.com/sqls-server/sqls/internal/diagnostic"
     "github.com/sqls-server/sqls/internal/lintconfig"
@@ -15,18 +16,35 @@ import (
 
 // ColumnValidator validates column references
 type ColumnValidator struct {
-    config  *lintconfig.Config
-    dbCache *database.DBCache
-    driver  string // Database driver (e.g., "mysql", "postgresql")
+    config           *lintconfig.Config
+    dbCache          *database.DBCache
+    driver           string            // Database driver (e.g., "mysql", "postgresql")
+    dialectFunctions map[string]bool   // Cached dialect-specific functions (uppercase)
+    dialectKeywords  map[string]bool   // Cached dialect-specific keywords (uppercase)
 }
 
 // NewColumnValidator creates a new column validator
 func NewColumnValidator(config *lintconfig.Config, dbCache *database.DBCache, driver string) *ColumnValidator {
-	return &ColumnValidator{
-		config:  config,
-		dbCache: dbCache,
-		driver:  driver,
+	v := &ColumnValidator{
+		config:           config,
+		dbCache:          dbCache,
+		driver:           driver,
+		dialectFunctions: make(map[string]bool),
+		dialectKeywords:  make(map[string]bool),
 	}
+
+	// Load dialect-specific functions
+	dbDriver := dialect.DatabaseDriver(driver)
+	for _, fn := range dialect.DataBaseFunctions(dbDriver) {
+		v.dialectFunctions[strings.ToUpper(fn)] = true
+	}
+
+	// Load dialect-specific keywords
+	for _, kw := range dialect.DataBaseKeywords(dbDriver) {
+		v.dialectKeywords[strings.ToUpper(kw)] = true
+	}
+
+	return v
 }
 
 // Validate performs column validation
@@ -601,20 +619,22 @@ func (v *ColumnValidator) shouldSkipIdentifier(ident *ast.Identifier) bool {
 
 // looksLikeColumnReference determines if an identifier looks like a column reference
 func (v *ColumnValidator) looksLikeColumnReference(ident *ast.Identifier) bool {
-	// Basic heuristic: if it's not a common SQL keyword, it's likely a column
+	// If it's a SQL keyword, function, or common keyword, it's not a column reference
 	name := strings.ToUpper(ident.String())
-	commonKeywords := []string{
-		"SELECT", "FROM", "WHERE", "JOIN", "LEFT", "RIGHT", "INNER", "OUTER",
-		"ON", "AND", "OR", "NOT", "IN", "EXISTS", "BETWEEN", "LIKE",
-		"ORDER", "GROUP", "BY", "HAVING", "LIMIT", "OFFSET",
-		"INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "ALTER",
-		"AS", "ASC", "DESC", "NULL", "IS", "TRUE", "FALSE",
+
+	// Check against dialect-specific functions
+	if v.dialectFunctions[name] {
+		return false
 	}
 
-	for _, keyword := range commonKeywords {
-		if name == keyword {
-			return false
-		}
+	// Check against dialect-specific keywords
+	if v.dialectKeywords[name] {
+		return false
+	}
+
+	// Check against common SQL keywords from the dialect.MatchKeyword
+	if dialect.MatchKeyword(name) != dialect.Unmatched {
+		return false
 	}
 
 	return true

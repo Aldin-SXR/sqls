@@ -121,3 +121,28 @@ WHERE email IS NOT NULL
 --   checkReservedWordCase: "error"
 --   checkMissingSemicolon: "warning"
 --   warnOnUnusedAlias: true
+
+-- === SQL FUNCTIONS SHOULD NOT BE TREATED AS COLUMNS ===
+
+-- Test case: SQL functions like GROUP_CONCAT, CONCAT should be recognized
+-- This should NOT produce "Column 'GROUP_CONCAT' not found" error
+SELECT c.salesRepEmployeeNumber, GROUP_CONCAT(c.address, "")
+FROM customers as c
+JOIN orderdetails od ON od.orderLineNumber = c.address
+WHERE c.address = "Hello"
+GROUP BY c.customer_id;
+
+-- Other common SQL functions that should be recognized
+SELECT
+    CONCAT(first_name, ' ', last_name) AS full_name,
+    COUNT(*) AS total_orders,
+    SUM(amount) AS total_amount,
+    AVG(amount) AS avg_amount,
+    MAX(amount) AS max_amount,
+    MIN(amount) AS min_amount,
+    UPPER(status) AS status_upper,
+    LOWER(email) AS email_lower,
+    COALESCE(phone, 'N/A') AS phone_number
+FROM customers c
+LEFT JOIN orders o ON c.id = o.customer_id
+GROUP BY c.id, full_name;
