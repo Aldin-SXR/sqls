@@ -65,6 +65,10 @@ func (v *ColumnValidator) Validate(text string, db *diagnostic.DiagnosticBuilder
     tables := v.extractTables(parsed, aliasMap)
     ctx := v.buildColumnContext(tables)
 
+    // Extract SELECT column aliases (e.g., "SELECT name AS n" -> map["n"] = true)
+    // These aliases can be used in ORDER BY and HAVING clauses
+    selectColumnAliases := v.extractSelectColumnAliases(parsed)
+
     // FIRST: Collect all identifiers that should be skipped from column validation
     // This includes:
     // 1. Identifiers that are part of MemberIdentifier nodes (qualified references like "customers.id")
@@ -286,6 +290,10 @@ func (v *ColumnValidator) Validate(text string, db *diagnostic.DiagnosticBuilder
                     return
                 }
                 nameLower := strings.ToLower(name)
+                // Skip if it's a SELECT column alias (can be used in ORDER BY/HAVING)
+                if selectColumnAliases[nameLower] {
+                    return
+                }
                 if _, existsInAny := ctx.AllColumns[nameLower]; !existsInAny {
                     if len(ctx.TableColumns) > 0 && v.looksLikeColumnReference(id) {
                         db.AddError(id.Pos(), id.End(), diagnostic.CodeColumnNotFound, fmt.Sprintf("Column '%s' not found in any referenced table", name))
@@ -333,6 +341,10 @@ func (v *ColumnValidator) Validate(text string, db *diagnostic.DiagnosticBuilder
                     return
                 }
                 nameLower := strings.ToLower(name)
+                // Skip if it's a SELECT column alias (can be used in ORDER BY/HAVING)
+                if selectColumnAliases[nameLower] {
+                    return
+                }
                 if _, existsInAny := ctx.AllColumns[nameLower]; !existsInAny {
                     if len(ctx.TableColumns) > 0 && v.looksLikeColumnReference(id) {
                         db.AddError(id.Pos(), id.End(), diagnostic.CodeColumnNotFound, fmt.Sprintf("Column '%s' not found in any referenced table", name))
@@ -426,6 +438,11 @@ func (v *ColumnValidator) Validate(text string, db *diagnostic.DiagnosticBuilder
         }
 
         nameLower := strings.ToLower(name)
+
+        // Skip if it's a SELECT column alias (can be used in ORDER BY/HAVING)
+        if selectColumnAliases[nameLower] {
+            return
+        }
 
         // Check if column exists
         if _, existsInAny := ctx.AllColumns[nameLower]; !existsInAny {
@@ -742,4 +759,35 @@ func (v *ColumnValidator) GetColumnsForTable(tableName string) ([]*database.Colu
 	}
 
 	return v.dbCache.ColumnDescs(tableName)
+}
+
+// extractSelectColumnAliases extracts all column aliases from SELECT clause
+// Returns a map of alias names (lowercase) -> true
+// These aliases can be used in ORDER BY and HAVING clauses
+func (v *ColumnValidator) extractSelectColumnAliases(parsed ast.TokenList) map[string]bool {
+	aliases := make(map[string]bool)
+
+	// Extract all SELECT expressions
+	selectExprs := parseutil.ExtractSelectExpr(parsed)
+
+	// Walk through each SELECT expression to find aliases
+	for _, expr := range selectExprs {
+		walk(expr, func(n ast.Node) {
+			if aliased, ok := n.(*ast.Aliased); ok {
+				// Get the alias name
+				if aliased.AliasedName != nil {
+					aliasIdent := aliased.GetAliasedNameIdent()
+					if aliasIdent != nil {
+						aliasName := aliasIdent.NoQuoteString()
+						if aliasName != "" {
+							// Store as lowercase for case-insensitive matching
+							aliases[strings.ToLower(aliasName)] = true
+						}
+					}
+				}
+			}
+		})
+	}
+
+	return aliases
 }
