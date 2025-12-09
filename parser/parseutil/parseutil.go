@@ -77,10 +77,11 @@ func encloseIsSubQuery(stmt ast.TokenList, pos token.Pos) bool {
 	if !ok {
 		return false
 	}
-	return isSubQuery(tokenList)
+	return IsSubQuery(tokenList)
 }
 
-func isSubQuery(tokenList ast.TokenList) bool {
+// IsSubQuery checks if a TokenList represents a subquery (SELECT inside parenthesis)
+func IsSubQuery(tokenList ast.TokenList) bool {
 	reader := astutil.NewNodeReader(tokenList)
 	if !reader.NextNode(false) {
 		return false
@@ -94,7 +95,8 @@ func isSubQuery(tokenList ast.TokenList) bool {
 	return true
 }
 
-func isSubQueryByNode(node ast.Node) bool {
+// IsSubQueryByNode checks if a node is an aliased subquery
+func IsSubQueryByNode(node ast.Node) bool {
 	alias, ok := node.(*ast.Aliased)
 	if !ok {
 		return false
@@ -103,7 +105,7 @@ func isSubQueryByNode(node ast.Node) bool {
 	if !ok {
 		return false
 	}
-	return isSubQuery(list)
+	return IsSubQuery(list)
 }
 
 func extractFocusedSubQuery(stmt ast.TokenList, pos token.Pos) ast.TokenList {
@@ -144,7 +146,7 @@ func ExtractSubQueryViews(parsed ast.TokenList, pos token.Pos) ([]*SubQueryInfo,
 		if !ok {
 			continue
 		}
-		if isSubQuery(list) {
+		if IsSubQuery(list) {
 			subQueries = append(subQueries, alias)
 			before = alias
 		}
@@ -208,7 +210,7 @@ func ExtractLastTable(parsed ast.TokenList, pos token.Pos) (*TableInfo, error) {
 			continue
 		}
 
-		if isSubQueryByNode(ident) {
+		if IsSubQueryByNode(ident) {
 			continue
 		}
 		infos, err := parseTableInfo(ident)
@@ -314,7 +316,7 @@ func extractSubQueryColumns(selectStmt ast.TokenList) ([]*SubQueryColumn, []*Tab
 	if !ok {
 		return cols, tables, nil
 	}
-	if !isSubQuery(parenthesis) {
+	if !IsSubQuery(parenthesis) {
 		return cols, tables, nil
 	}
 
@@ -345,7 +347,7 @@ func extractTableIdentifier(list ast.TokenList, isSubQuery bool, stopPos *token.
 	nodes = append(nodes, ExtractTableFactor(list)...)
 	res := []*TableInfo{}
 	for _, ident := range nodes {
-		if !isSubQuery && isSubQueryByNode(ident) {
+		if !isSubQuery && IsSubQueryByNode(ident) {
 			continue
 		}
 

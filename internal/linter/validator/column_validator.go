@@ -134,6 +134,13 @@ func (v *ColumnValidator) Validate(text string, db *diagnostic.DiagnosticBuilder
         collectTableRefPositions(node)
     }
 
+    // Collect all table references from subqueries
+    // These should be skipped during validation as they are in a different scope
+    subQueryPositions := v.extractSubQueryPositions(parsed)
+    for pos := range subQueryPositions {
+        skipIdentifierPositions[pos] = true
+    }
+
     // Collect alias names from Aliased nodes (e.g., "SELECT col AS alias_name")
     // The alias names themselves should not be validated as column references
     walk(parsed, func(n ast.Node) {
@@ -694,6 +701,85 @@ func (v *ColumnValidator) isMySQLDriver() bool {
 // checkAmbiguousColumns checks for ambiguous column references
 // checkAmbiguousColumns handled inline in Validate where context is available
 
+// extractSubQueryPositions recursively finds all subquery table references
+// and returns their positions to be added to skipIdentifierPositions
+func (v *ColumnValidator) extractSubQueryPositions(parsed ast.TokenList) map[string]bool {
+	positions := make(map[string]bool)
+
+	walk(parsed, func(n ast.Node) {
+		// Check for parenthesis nodes that contain subqueries
+		parenthesis, ok := n.(*ast.Parenthesis)
+		if !ok {
+			return
+		}
+
+		// Use parseutil.IsSubQuery to check if this is a subquery
+		if !parseutil.IsSubQuery(parenthesis) {
+			return
+		}
+
+		// Extract table references from within this subquery
+		inner := parenthesis.Inner()
+		subqueryTables := v.extractTableReferencesFromSubQuery(inner)
+
+		// Add all table identifier positions to skip list
+		for pos := range subqueryTables {
+			positions[pos] = true
+		}
+	})
+
+	return positions
+}
+
+// extractTableReferencesFromSubQuery extracts table reference positions from a subquery
+func (v *ColumnValidator) extractTableReferencesFromSubQuery(inner ast.TokenList) map[string]bool {
+	positions := make(map[string]bool)
+
+	// Recursive function to collect all table reference positions
+	var collectTableRefPositions func(ast.Node)
+	collectTableRefPositions = func(n ast.Node) {
+		if n == nil {
+			return
+		}
+		switch t := n.(type) {
+		case *ast.Identifier:
+			pos := fmt.Sprintf("%d:%d", t.Pos().Line, t.Pos().Col)
+			positions[pos] = true
+		case *ast.MemberIdentifier:
+			// Schema.table references
+			if t.ChildIdent != nil {
+				pos := fmt.Sprintf("%d:%d", t.ChildIdent.Pos().Line, t.ChildIdent.Pos().Col)
+				positions[pos] = true
+			}
+			if t.ParentIdent != nil {
+				pos := fmt.Sprintf("%d:%d", t.ParentIdent.Pos().Line, t.ParentIdent.Pos().Col)
+				positions[pos] = true
+			}
+		case *ast.Aliased:
+			// Table aliases in subquery
+			collectTableRefPositions(t.RealName)
+		case *ast.IdentifierList:
+			// Multiple table references
+			for _, id := range t.GetIdentifiers() {
+				collectTableRefPositions(id)
+			}
+		}
+	}
+
+	// Extract table references from this subquery scope
+	for _, node := range parseutil.ExtractTableReferences(inner) {
+		collectTableRefPositions(node)
+	}
+	for _, node := range parseutil.ExtractTableReference(inner) {
+		collectTableRefPositions(node)
+	}
+	for _, node := range parseutil.ExtractTableFactor(inner) {
+		collectTableRefPositions(node)
+	}
+
+	return positions
+}
+
 // extractTables builds a table list and alias mapping from parsed query
 func (v *ColumnValidator) extractTables(parsed ast.TokenList, aliasMap map[string]string) []*parseutil.TableInfo {
     var toInfos func(n ast.Node) []*parseutil.TableInfo
@@ -715,6 +801,11 @@ func (v *ColumnValidator) extractTables(parsed ast.TokenList, aliasMap map[strin
                 case *ast.MemberIdentifier:
                     aliasMap[strings.ToLower(alias)] = real.GetChildIdent().NoQuoteString()
                     out = append(out, &parseutil.TableInfo{DatabaseSchema: real.GetParent().String(), Name: real.GetChild().String(), Alias: alias})
+                case ast.TokenList:
+                    // Derived table (subquery): (SELECT ...) AS alias
+                    // The alias refers to the subquery result, so map alias -> alias as the "table" name
+                    aliasMap[strings.ToLower(alias)] = alias
+                    out = append(out, &parseutil.TableInfo{Name: alias, Alias: alias})
                 }
             }
         case *ast.IdentifierList:
