@@ -347,6 +347,13 @@ func (s *Server) handleWorkspaceDidChangeConfiguration(ctx context.Context, conn
 		return nil, err
 	}
 	s.WSCfg = params.Settings.SQLS
+	s.updateLinterConfig()
+	// Refresh open documents immediately, including clearing diagnostics when disabled.
+	for uri := range s.files {
+		if err := s.lintDocument(ctx, conn, uri); err != nil {
+			return nil, err
+		}
+	}
 
 	// Skip database connection
 	if s.dbConn != nil {

@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log"
 	"net"
@@ -17,11 +18,12 @@ import (
 const testFileURI = "file:///Users/octref/Code/css-test/test.sql"
 
 type TestContext struct {
-	h          jsonrpc2.Handler
-	conn       *jsonrpc2.Conn
-	connServer *jsonrpc2.Conn
-	server     *Server
-	ctx        context.Context
+	diagnostics chan lsp.PublishDiagnosticsParams
+	h           jsonrpc2.Handler
+	conn        *jsonrpc2.Conn
+	connServer  *jsonrpc2.Conn
+	server      *Server
+	ctx         context.Context
 }
 
 func newTestContext() *TestContext {
@@ -64,6 +66,13 @@ func (tx *TestContext) initServer(t *testing.T) {
 	tx.connServer = jsonrpc2.NewConn(tx.ctx, jsonrpc2.NewBufferedStream(server, jsonrpc2.VSCodeObjectCodec{}), tx.h)
 	clientHandler := jsonrpc2.HandlerWithError(func(ctx context.Context, conn *jsonrpc2.Conn, req *jsonrpc2.Request) (interface{}, error) {
 		if req.Method == "textDocument/publishDiagnostics" {
+			if tx.diagnostics != nil {
+				var params lsp.PublishDiagnosticsParams
+				if err := json.Unmarshal(*req.Params, &params); err != nil {
+					return nil, err
+				}
+				tx.diagnostics <- params
+			}
 			return nil, nil
 		}
 		return tx.server.Handle(ctx, conn, req)
