@@ -1,0 +1,884 @@
+package validator
+
+import (
+    "fmt"
+    "strings"
+
+    "github.com/sqls-server/sqls/ast"
+    "github.com/sqls-server/sqls/dialect"
+    "github.com/sqls-server/sqls/internal/database"
+    "github.com/sqls-server/sqls/internal/diagnostic"
+    "github.com/sqls-server/sqls/internal/lintconfig"
+    "github.com/sqls-server/sqls/parser"
+    "github.com/sqls-server/sqls/parser/parseutil"
+    "github.com/sqls-server/sqls/token"
+)
+
+// ColumnValidator validates column references
+type ColumnValidator struct {
+    config           *lintconfig.Config
+    dbCache          *database.DBCache
+    driver           string            // Database driver (e.g., "mysql", "postgresql")
+    dialectFunctions map[string]bool   // Cached dialect-specific functions (uppercase)
+    dialectKeywords  map[string]bool   // Cached dialect-specific keywords (uppercase)
+}
+
+// NewColumnValidator creates a new column validator
+func NewColumnValidator(config *lintconfig.Config, dbCache *database.DBCache, driver string) *ColumnValidator {
+	v := &ColumnValidator{
+		config:           config,
+		dbCache:          dbCache,
+		driver:           driver,
+		dialectFunctions: make(map[string]bool),
+		dialectKeywords:  make(map[string]bool),
+	}
+
+	// Load dialect-specific functions
+	dbDriver := dialect.DatabaseDriver(driver)
+	for _, fn := range dialect.DataBaseFunctions(dbDriver) {
+		v.dialectFunctions[strings.ToUpper(fn)] = true
+	}
+
+	// Load dialect-specific keywords
+	for _, kw := range dialect.DataBaseKeywords(dbDriver) {
+		v.dialectKeywords[strings.ToUpper(kw)] = true
+	}
+
+	return v
+}
+
+// Validate performs column validation
+func (v *ColumnValidator) Validate(text string, db *diagnostic.DiagnosticBuilder) {
+    if !v.config.CheckColumnReferences {
+        return
+    }
+    if v.dbCache == nil {
+        return
+    }
+    parsed, err := parser.Parse(text)
+    if err != nil {
+        return
+    }
+
+    // Build table list and alias map alias->table
+    aliasMap := map[string]string{}
+    tables := v.extractTables(parsed, aliasMap)
+    ctx := v.buildColumnContext(tables)
+
+    // Extract SELECT column aliases (e.g., "SELECT name AS n" -> map["n"] = true)
+    // These aliases can be used in ORDER BY and HAVING clauses
+    selectColumnAliases := v.extractSelectColumnAliases(parsed)
+
+    // FIRST: Collect all identifiers that should be skipped from column validation
+    // This includes:
+    // 1. Identifiers that are part of MemberIdentifier nodes (qualified references like "customers.id")
+    // 2. Identifiers that are table references (FROM/JOIN clauses like "FROM customers")
+    // Use position-based tracking instead of pointer comparison to avoid instance mismatch issues
+    skipIdentifierPositions := make(map[string]bool)
+
+    // Collect MemberIdentifier components
+    // Only add to skip list if it's a COMPLETE MemberIdentifier (both parent and child present)
+    // Incomplete ones (e.g., ".column" or "table.") should be validated as errors
+    walk(parsed, func(n ast.Node) {
+        if m, ok := n.(*ast.MemberIdentifier); ok {
+            // Only skip if BOTH parent and child are present (complete qualified reference)
+            if m.ParentIdent != nil && m.ChildIdent != nil {
+                pos := fmt.Sprintf("%d:%d", m.ParentIdent.Pos().Line, m.ParentIdent.Pos().Col)
+                skipIdentifierPositions[pos] = true // Mark parent (table/alias name)
+
+                childPos := fmt.Sprintf("%d:%d", m.ChildIdent.Pos().Line, m.ChildIdent.Pos().Col)
+                skipIdentifierPositions[childPos] = true // Mark child (column name)
+            }
+        }
+    })
+
+    // Collect table reference identifiers (FROM/JOIN clauses)
+    var collectTableRefPositions func(ast.Node)
+    collectTableRefPositions = func(n ast.Node) {
+        if n == nil {
+            return
+        }
+        switch t := n.(type) {
+        case *ast.Identifier:
+            pos := fmt.Sprintf("%d:%d", t.Pos().Line, t.Pos().Col)
+            skipIdentifierPositions[pos] = true
+        case *ast.MemberIdentifier:
+            // Schema.table references
+            if t.ChildIdent != nil {
+                pos := fmt.Sprintf("%d:%d", t.ChildIdent.Pos().Line, t.ChildIdent.Pos().Col)
+                skipIdentifierPositions[pos] = true
+            }
+            if t.ParentIdent != nil {
+                pos := fmt.Sprintf("%d:%d", t.ParentIdent.Pos().Line, t.ParentIdent.Pos().Col)
+                skipIdentifierPositions[pos] = true
+            }
+        case *ast.Aliased:
+            // Table aliases: "FROM customers AS c" - skip both "customers" and position of alias itself
+            collectTableRefPositions(t.RealName)
+        case *ast.IdentifierList:
+            // Multiple table references: "FROM table1, table2" or JOIN chains
+            for _, id := range t.GetIdentifiers() {
+                collectTableRefPositions(id)
+            }
+        }
+    }
+
+    // Collect from all table reference extraction points
+    for _, node := range parseutil.ExtractTableReferences(parsed) {
+        collectTableRefPositions(node)
+    }
+    for _, node := range parseutil.ExtractTableReference(parsed) {
+        collectTableRefPositions(node)
+    }
+    for _, node := range parseutil.ExtractTableFactor(parsed) {
+        collectTableRefPositions(node)
+    }
+
+    // Collect all table references from subqueries
+    // These should be skipped during validation as they are in a different scope
+    subQueryPositions := v.extractSubQueryPositions(parsed)
+    for pos := range subQueryPositions {
+        skipIdentifierPositions[pos] = true
+    }
+
+    // Collect alias names from Aliased nodes (e.g., "SELECT col AS alias_name")
+    // The alias names themselves should not be validated as column references
+    walk(parsed, func(n ast.Node) {
+        if aliased, ok := n.(*ast.Aliased); ok {
+            if aliased.AliasedName != nil {
+                // Walk the aliased name to find all identifiers within it
+                walk(aliased.AliasedName, func(aliasNode ast.Node) {
+                    if id, ok := aliasNode.(*ast.Identifier); ok {
+                        pos := fmt.Sprintf("%d:%d", id.Pos().Line, id.Pos().Col)
+                        skipIdentifierPositions[pos] = true
+                    }
+                })
+            }
+        }
+    })
+
+    // Validate qualified column references (t.col and t.*)
+    walk(parsed, func(n ast.Node) {
+        m, ok := n.(*ast.MemberIdentifier)
+        if !ok {
+            return
+        }
+
+        // Check for incomplete qualified references
+        if m.ChildIdent == nil && m.ParentIdent != nil {
+            // Case: "table." or "alias." - qualifier without column
+            db.AddError(
+                m.ParentIdent.Pos(),
+                m.End(),
+                diagnostic.CodeSyntaxError,
+                fmt.Sprintf("Incomplete qualified reference: expected column name after '%s.'", m.ParentIdent.NoQuoteString()),
+            )
+            return
+        }
+
+        if m.ChildIdent != nil && m.ParentIdent == nil {
+            // Case: ".column" - column without qualifier
+            db.AddError(
+                m.Pos(),
+                m.ChildIdent.End(),
+                diagnostic.CodeSyntaxError,
+                fmt.Sprintf("Incomplete qualified reference: expected table or alias name before '.%s'", m.ChildIdent.NoQuoteString()),
+            )
+            return
+        }
+
+        if m.ChildIdent == nil || m.ParentIdent == nil {
+            // Both are nil or some other edge case
+            return
+        }
+
+        // Parent might be alias or table name
+        parent := m.ParentIdent
+        parentName := parent.NoQuoteString()
+        tableName := parentName
+        isValidAlias := false
+        if t, ok := aliasMap[strings.ToLower(parentName)]; ok {
+            tableName = t
+            isValidAlias = true
+        }
+
+        // Check if parentName references a valid table/alias from the query
+        // If it's not an alias, check if it's a table name in the context
+        if !isValidAlias {
+            _, foundInContext := ctx.TableColumns[strings.ToLower(parentName)]
+            if !foundInContext {
+                // Check if it's a valid table name from the tables list
+                isValidTable := false
+                for _, tableInfo := range tables {
+                    if strings.EqualFold(tableInfo.Name, parentName) || strings.EqualFold(tableInfo.Alias, parentName) {
+                        isValidTable = true
+                        break
+                    }
+                }
+                if !isValidTable {
+                    // Invalid table/alias reference
+                    db.AddError(
+                        parent.Pos(),
+                        parent.End(),
+                        diagnostic.CodeTableNotFound,
+                        fmt.Sprintf("Table or alias '%s' not found in query", parentName),
+                    )
+                    return
+                }
+            }
+        }
+
+        // Allow wildcard expansion like alias.* or table.*
+        colName := m.ChildIdent.NoQuoteString()
+        if m.ChildIdent.IsWildcard() || colName == "*" || colName == "" {
+            return
+        }
+
+        // Look up columns from context (uses case-insensitive keys)
+        cols, ok := ctx.TableColumns[strings.ToLower(tableName)]
+        if !ok {
+            // Try looking up from cache as fallback
+            cols, ok = v.dbCache.ColumnDescs(tableName)
+            if !ok {
+                // search all schemas
+                for _, schema := range v.dbCache.SortedSchemas() {
+                    if c, ok2 := v.dbCache.ColumnDatabase(schema, tableName); ok2 {
+                        cols, ok = c, true
+                        break
+                    }
+                }
+            }
+        }
+
+        if !ok || len(cols) == 0 {
+            // If we can't find the table columns, don't report column errors
+            // (the table exists in the query but we don't have schema info)
+            return
+        }
+        found := false
+        for _, c := range cols {
+            if strings.EqualFold(c.Name, colName) {
+                found = true
+                break
+            }
+        }
+        if !found {
+            db.AddError(
+                m.ChildIdent.Pos(),
+                m.ChildIdent.End(),
+                diagnostic.CodeColumnNotFound,
+                diagnostic.FormatError(diagnostic.CodeColumnNotFound, colName, tableName),
+            )
+        }
+    })
+
+    // Validate unqualified identifiers in SELECT and WHERE
+    // 1) SELECT list
+    for _, node := range parseutil.ExtractSelectExpr(parsed) {
+        walk(node, func(n ast.Node) {
+            if id, ok := n.(*ast.Identifier); ok {
+                // Skip if this identifier should not be validated as a column
+                idPos := fmt.Sprintf("%d:%d", id.Pos().Line, id.Pos().Col)
+                if skipIdentifierPositions[idPos] {
+                    return
+                }
+
+                // Skip string literals (single or double-quoted strings)
+                if v.isStringLiteral(id) {
+                    return
+                }
+
+                name := id.NoQuoteString()
+                if name == "" || id.IsWildcard() {
+                    return
+                }
+                // Skip aliases and table names
+                if _, ok := aliasMap[strings.ToLower(name)]; ok {
+                    return
+                }
+                nameLower := strings.ToLower(name)
+                // Skip if it's a SELECT column alias (can be used in ORDER BY/HAVING)
+                if selectColumnAliases[nameLower] {
+                    return
+                }
+                if _, existsInAny := ctx.AllColumns[nameLower]; !existsInAny {
+                    if len(ctx.TableColumns) > 0 && v.looksLikeColumnReference(id) {
+                        db.AddError(id.Pos(), id.End(), diagnostic.CodeColumnNotFound, fmt.Sprintf("Column '%s' not found in any referenced table", name))
+                    }
+                    return
+                }
+                // Ambiguity check
+                if cols := ctx.AllColumns[nameLower]; len(cols) > 1 && v.config.WarnOnAmbiguousColumn {
+                    // Collect unique table names for message
+                    seen := map[string]bool{}
+                    unique := []string{}
+                    for _, c := range cols {
+                        if !seen[c.Table] {
+                            seen[c.Table] = true
+                            unique = append(unique, c.Table)
+                        }
+                    }
+                    if len(unique) > 1 {
+                        db.AddWarning(id.Pos(), id.End(), diagnostic.CodeAmbiguousColumn, diagnostic.FormatError(diagnostic.CodeAmbiguousColumn, name, strings.Join(unique, ", ")))
+                    }
+                }
+            }
+        })
+    }
+    // 2) WHERE conditions
+    for _, node := range parseutil.ExtractWhereCondition(parsed) {
+        walk(node, func(n ast.Node) {
+            if id, ok := n.(*ast.Identifier); ok {
+                // Skip if this identifier should not be validated as a column
+                idPos := fmt.Sprintf("%d:%d", id.Pos().Line, id.Pos().Col)
+                if skipIdentifierPositions[idPos] {
+                    return
+                }
+
+                // Skip string literals (single or double-quoted strings)
+                if v.isStringLiteral(id) {
+                    return
+                }
+
+                name := id.NoQuoteString()
+                if name == "" || id.IsWildcard() {
+                    return
+                }
+                if _, ok := aliasMap[strings.ToLower(name)]; ok {
+                    return
+                }
+                nameLower := strings.ToLower(name)
+                // Skip if it's a SELECT column alias (can be used in ORDER BY/HAVING)
+                if selectColumnAliases[nameLower] {
+                    return
+                }
+                if _, existsInAny := ctx.AllColumns[nameLower]; !existsInAny {
+                    if len(ctx.TableColumns) > 0 && v.looksLikeColumnReference(id) {
+                        db.AddError(id.Pos(), id.End(), diagnostic.CodeColumnNotFound, fmt.Sprintf("Column '%s' not found in any referenced table", name))
+                    }
+                    return
+                }
+                if cols := ctx.AllColumns[nameLower]; len(cols) > 1 && v.config.WarnOnAmbiguousColumn {
+                    seen := map[string]bool{}
+                    unique := []string{}
+                    for _, c := range cols {
+                        if !seen[c.Table] {
+                            seen[c.Table] = true
+                            unique = append(unique, c.Table)
+                        }
+                    }
+                    if len(unique) > 1 {
+                        db.AddWarning(id.Pos(), id.End(), diagnostic.CodeAmbiguousColumn, diagnostic.FormatError(diagnostic.CodeAmbiguousColumn, name, strings.Join(unique, ", ")))
+                    }
+                }
+            }
+        })
+    }
+
+    // Check for orphaned period tokens (e.g., ".column_name" without table/alias)
+    // This catches cases where the parser doesn't create a MemberIdentifier
+    var checkForOrphanedPeriods func(ast.TokenList)
+    checkForOrphanedPeriods = func(nodes ast.TokenList) {
+        tokens := nodes.GetTokens()
+        for i := 0; i < len(tokens); i++ {
+            node := tokens[i]
+
+            // Check if this is a period/dot token
+            if tok, ok := node.(ast.Token); ok {
+                if tok.GetToken() != nil && tok.GetToken().Kind == token.Period {
+                    // Found a period token, check if there's an identifier after it
+                    if i+1 < len(tokens) {
+                        if nextIdent, ok := tokens[i+1].(*ast.Identifier); ok {
+                            // Check if this period+identifier is NOT part of a MemberIdentifier
+                            // by checking if the identifier is in skipIdentifierPositions
+                            nextPos := fmt.Sprintf("%d:%d", nextIdent.Pos().Line, nextIdent.Pos().Col)
+                            if !skipIdentifierPositions[nextPos] {
+                                // This is likely ".column_name" without a table/alias prefix
+                                db.AddError(
+                                    tok.Pos(),
+                                    nextIdent.End(),
+                                    diagnostic.CodeSyntaxError,
+                                    fmt.Sprintf("Incomplete qualified reference: expected table or alias name before '.%s'", nextIdent.NoQuoteString()),
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Recursively check nested token lists
+            if list, ok := node.(ast.TokenList); ok {
+                checkForOrphanedPeriods(list)
+            }
+        }
+    }
+    checkForOrphanedPeriods(parsed)
+
+    // 3) Validate standalone unqualified identifiers in the entire query
+    // This catches identifiers in ON clauses, ORDER BY, etc. that aren't in SELECT/WHERE
+    // skipIdentifierPositions already collected above, so just validate remaining identifiers
+    walk(parsed, func(n ast.Node) {
+        id, ok := n.(*ast.Identifier)
+        if !ok {
+            return
+        }
+
+        // Skip if this identifier should not be validated as a column
+        idPos := fmt.Sprintf("%d:%d", id.Pos().Line, id.Pos().Col)
+        if skipIdentifierPositions[idPos] {
+            return
+        }
+
+        // Skip string literals (single or double-quoted strings)
+        if v.isStringLiteral(id) {
+            return
+        }
+
+        name := id.NoQuoteString()
+        if name == "" || id.IsWildcard() {
+            return
+        }
+
+        // Skip if it's a table alias (but NOT a table name - see below)
+        if _, ok := aliasMap[strings.ToLower(name)]; ok {
+            return
+        }
+
+        nameLower := strings.ToLower(name)
+
+        // Skip if it's a SELECT column alias (can be used in ORDER BY/HAVING)
+        if selectColumnAliases[nameLower] {
+            return
+        }
+
+        // Check if column exists
+        if _, existsInAny := ctx.AllColumns[nameLower]; !existsInAny {
+            // Check if it's a known table name used incorrectly as a column
+            isTableName := false
+            for _, tableInfo := range tables {
+                if strings.EqualFold(tableInfo.Name, name) {
+                    isTableName = true
+                    break
+                }
+            }
+
+            if isTableName {
+                // Error: table name used where column expected
+                db.AddError(
+                    id.Pos(),
+                    id.End(),
+                    diagnostic.CodeColumnNotFound,
+                    fmt.Sprintf("'%s' is a table name, not a column. Did you mean '%s.column_name'?", name, name),
+                )
+            } else if len(ctx.TableColumns) > 0 && v.looksLikeColumnReference(id) {
+                // Regular column not found error
+                db.AddError(id.Pos(), id.End(), diagnostic.CodeColumnNotFound, fmt.Sprintf("Column '%s' not found in any referenced table", name))
+            }
+            return
+        }
+
+        // Ambiguity check - only for unqualified references
+        if cols := ctx.AllColumns[nameLower]; len(cols) > 1 && v.config.WarnOnAmbiguousColumn {
+            seen := map[string]bool{}
+            unique := []string{}
+            for _, c := range cols {
+                if !seen[c.Table] {
+                    seen[c.Table] = true
+                    unique = append(unique, c.Table)
+                }
+            }
+            if len(unique) > 1 {
+                db.AddWarning(id.Pos(), id.End(), diagnostic.CodeAmbiguousColumn, diagnostic.FormatError(diagnostic.CodeAmbiguousColumn, name, strings.Join(unique, ", ")))
+            }
+        }
+    })
+}
+
+// ColumnContext holds information about columns available in the query
+type ColumnContext struct {
+	// Map of table name -> columns
+	TableColumns map[string][]*database.ColumnDesc
+	// Map of table alias -> actual table name
+	TableAliases map[string]string
+	// All available columns (for unqualified references)
+	AllColumns map[string][]*database.ColumnDesc // column name -> tables that have it
+}
+
+// buildColumnContext builds the column context from table references
+func (v *ColumnValidator) buildColumnContext(tables []*parseutil.TableInfo) *ColumnContext {
+	context := &ColumnContext{
+		TableColumns: make(map[string][]*database.ColumnDesc),
+		TableAliases: make(map[string]string),
+		AllColumns:   make(map[string][]*database.ColumnDesc),
+	}
+
+	for _, tableInfo := range tables {
+		tableName := tableInfo.Name
+		alias := tableInfo.Alias
+
+		// Get columns for this table
+		cols, ok := v.dbCache.ColumnDescs(tableName)
+		if !ok && tableInfo.DatabaseSchema != "" {
+			// Try with schema-qualified name
+			fullName := tableInfo.DatabaseSchema + "." + tableName
+			cols, ok = v.dbCache.ColumnDescs(fullName)
+		}
+		// If still not found, search all schemas (important for JOIN tables)
+		if !ok {
+			for _, schema := range v.dbCache.SortedSchemas() {
+				if c, found := v.dbCache.ColumnDatabase(schema, tableName); found {
+					cols, ok = c, true
+					break
+				}
+			}
+		}
+
+		if ok && len(cols) > 0 {
+			// Store by table name for lookup (case-insensitive key)
+			context.TableColumns[strings.ToLower(tableName)] = cols
+
+			// Register alias (case-insensitive storage already handled in aliasMap)
+			if alias != "" {
+				context.TableAliases[strings.ToLower(alias)] = tableName
+			}
+
+			// Also register the table name itself as a valid reference
+			context.TableAliases[strings.ToLower(tableName)] = tableName
+
+			// Add to all columns map for ambiguity checking
+			for _, col := range cols {
+				colName := col.Name
+				if existing, ok := context.AllColumns[strings.ToLower(colName)]; ok {
+					context.AllColumns[strings.ToLower(colName)] = append(existing, col)
+				} else {
+					context.AllColumns[strings.ToLower(colName)] = []*database.ColumnDesc{col}
+				}
+			}
+		}
+	}
+
+	return context
+}
+
+// validateColumnReferences: not used; validation is performed directly in Validate
+
+// validateMemberIdentifier validates a qualified column reference (table.column)
+func (v *ColumnValidator) validateMemberIdentifier(member *ast.MemberIdentifier, context *ColumnContext, db *diagnostic.DiagnosticBuilder) {
+	if member.ParentIdent == nil || member.ChildIdent == nil {
+		return
+	}
+
+	tableName := member.ParentIdent.String()
+	columnName := member.ChildIdent.String()
+
+	// Resolve alias to actual table name
+	if actualTable, ok := context.TableAliases[tableName]; ok {
+		tableName = actualTable
+	}
+
+	// Check if table exists in context
+	cols, ok := context.TableColumns[tableName]
+	if !ok {
+		// Table not in context, might be a schema.table reference
+		return
+	}
+
+	// Check if column exists in the table
+	found := false
+	for _, col := range cols {
+		if strings.EqualFold(col.Name, columnName) {
+			found = true
+			break
+		}
+	}
+
+	if !found {
+        db.AddError(
+            member.ChildIdent.Pos(),
+            member.ChildIdent.End(),
+            diagnostic.CodeColumnNotFound,
+            diagnostic.FormatError(diagnostic.CodeColumnNotFound, columnName, tableName),
+        )
+	}
+}
+
+// validateIdentifier validates an unqualified column reference
+func (v *ColumnValidator) validateIdentifier(ident *ast.Identifier, context *ColumnContext, db *diagnostic.DiagnosticBuilder) {
+	// Skip validation for certain contexts
+	if v.shouldSkipIdentifier(ident) {
+		return
+	}
+
+	columnName := ident.String()
+
+	// Check if this column exists in any of the available tables
+	if _, ok := context.AllColumns[columnName]; !ok {
+		// Column not found in any table - but we need to be careful here
+		// as it might be a function, alias, or other valid identifier
+		// Only report if we have tables in context and it looks like a column reference
+		if len(context.TableColumns) > 0 && v.looksLikeColumnReference(ident) {
+            db.AddError(
+                ident.Pos(),
+                ident.End(),
+                diagnostic.CodeColumnNotFound,
+                fmt.Sprintf("Column '%s' not found in any referenced table", columnName),
+            )
+		}
+	}
+}
+
+// shouldSkipIdentifier determines if an identifier should skip validation
+func (v *ColumnValidator) shouldSkipIdentifier(ident *ast.Identifier) bool {
+	// Skip very short identifiers that are likely keywords
+	if len(ident.String()) <= 2 {
+		return true
+	}
+
+	// Skip if it's part of an alias definition
+	// This would require more context from the parent node
+	// For now, we'll use a simple heuristic
+
+	return false
+}
+
+// looksLikeColumnReference determines if an identifier looks like a column reference
+func (v *ColumnValidator) looksLikeColumnReference(ident *ast.Identifier) bool {
+	// If it's a SQL keyword, function, or common keyword, it's not a column reference
+	name := strings.ToUpper(ident.String())
+
+	// Check against dialect-specific functions
+	if v.dialectFunctions[name] {
+		return false
+	}
+
+	// Check against dialect-specific keywords
+	if v.dialectKeywords[name] {
+		return false
+	}
+
+	// Check against common SQL keywords from the dialect.MatchKeyword
+	if dialect.MatchKeyword(name) != dialect.Unmatched {
+		return false
+	}
+
+	return true
+}
+
+// isStringLiteral determines if an identifier is actually a string literal
+func (v *ColumnValidator) isStringLiteral(ident *ast.Identifier) bool {
+	if ident.GetToken() == nil {
+		return false
+	}
+
+	// Check if it's a single-quoted string (standard SQL string literal)
+	if ident.GetToken().MatchKind(token.SingleQuotedString) {
+		return true
+	}
+
+	// Check the raw string representation
+	raw := ident.GetToken().String()
+	if len(raw) >= 2 {
+		// Single quotes are always string literals
+		if raw[0] == '\'' {
+			return true
+		}
+
+		// Double quotes are string literals only in MySQL
+		// In other SQL dialects (PostgreSQL, Oracle, etc.), double quotes denote identifiers
+		if raw[0] == '"' && v.isMySQLDriver() {
+			return true
+		}
+	}
+
+	return false
+}
+
+// isMySQLDriver checks if the current driver is MySQL
+func (v *ColumnValidator) isMySQLDriver() bool {
+	return v.driver == "mysql" || v.driver == "mysql8" || v.driver == "mysql57" || v.driver == "mysql56"
+}
+
+// checkAmbiguousColumns checks for ambiguous column references
+// checkAmbiguousColumns handled inline in Validate where context is available
+
+// extractSubQueryPositions recursively finds all subquery table references
+// and returns their positions to be added to skipIdentifierPositions
+func (v *ColumnValidator) extractSubQueryPositions(parsed ast.TokenList) map[string]bool {
+	positions := make(map[string]bool)
+
+	walk(parsed, func(n ast.Node) {
+		// Check for parenthesis nodes that contain subqueries
+		parenthesis, ok := n.(*ast.Parenthesis)
+		if !ok {
+			return
+		}
+
+		// Use parseutil.IsSubQuery to check if this is a subquery
+		if !parseutil.IsSubQuery(parenthesis) {
+			return
+		}
+
+		// Extract table references from within this subquery
+		inner := parenthesis.Inner()
+		subqueryTables := v.extractTableReferencesFromSubQuery(inner)
+
+		// Add all table identifier positions to skip list
+		for pos := range subqueryTables {
+			positions[pos] = true
+		}
+	})
+
+	return positions
+}
+
+// extractTableReferencesFromSubQuery extracts table reference positions from a subquery
+func (v *ColumnValidator) extractTableReferencesFromSubQuery(inner ast.TokenList) map[string]bool {
+	positions := make(map[string]bool)
+
+	// Recursive function to collect all table reference positions
+	var collectTableRefPositions func(ast.Node)
+	collectTableRefPositions = func(n ast.Node) {
+		if n == nil {
+			return
+		}
+		switch t := n.(type) {
+		case *ast.Identifier:
+			pos := fmt.Sprintf("%d:%d", t.Pos().Line, t.Pos().Col)
+			positions[pos] = true
+		case *ast.MemberIdentifier:
+			// Schema.table references
+			if t.ChildIdent != nil {
+				pos := fmt.Sprintf("%d:%d", t.ChildIdent.Pos().Line, t.ChildIdent.Pos().Col)
+				positions[pos] = true
+			}
+			if t.ParentIdent != nil {
+				pos := fmt.Sprintf("%d:%d", t.ParentIdent.Pos().Line, t.ParentIdent.Pos().Col)
+				positions[pos] = true
+			}
+		case *ast.Aliased:
+			// Table aliases in subquery
+			collectTableRefPositions(t.RealName)
+		case *ast.IdentifierList:
+			// Multiple table references
+			for _, id := range t.GetIdentifiers() {
+				collectTableRefPositions(id)
+			}
+		}
+	}
+
+	// Extract table references from this subquery scope
+	for _, node := range parseutil.ExtractTableReferences(inner) {
+		collectTableRefPositions(node)
+	}
+	for _, node := range parseutil.ExtractTableReference(inner) {
+		collectTableRefPositions(node)
+	}
+	for _, node := range parseutil.ExtractTableFactor(inner) {
+		collectTableRefPositions(node)
+	}
+
+	return positions
+}
+
+// extractTables builds a table list and alias mapping from parsed query
+func (v *ColumnValidator) extractTables(parsed ast.TokenList, aliasMap map[string]string) []*parseutil.TableInfo {
+    var toInfos func(n ast.Node) []*parseutil.TableInfo
+    toInfos = func(n ast.Node) []*parseutil.TableInfo {
+        var out []*parseutil.TableInfo
+        switch t := n.(type) {
+        case *ast.Identifier:
+            out = append(out, &parseutil.TableInfo{Name: t.NoQuoteString()})
+        case *ast.MemberIdentifier:
+            out = append(out, &parseutil.TableInfo{DatabaseSchema: t.GetParent().String(), Name: t.GetChild().String()})
+        case *ast.Aliased:
+            // record alias mapping
+            if t.AliasedName != nil {
+                alias := t.GetAliasedNameIdent().NoQuoteString()
+                switch real := t.RealName.(type) {
+                case *ast.Identifier:
+                    aliasMap[strings.ToLower(alias)] = real.NoQuoteString()
+                    out = append(out, &parseutil.TableInfo{Name: real.NoQuoteString(), Alias: alias})
+                case *ast.MemberIdentifier:
+                    aliasMap[strings.ToLower(alias)] = real.GetChildIdent().NoQuoteString()
+                    out = append(out, &parseutil.TableInfo{DatabaseSchema: real.GetParent().String(), Name: real.GetChild().String(), Alias: alias})
+                case ast.TokenList:
+                    // Derived table (subquery): (SELECT ...) AS alias
+                    // The alias refers to the subquery result, so map alias -> alias as the "table" name
+                    aliasMap[strings.ToLower(alias)] = alias
+                    out = append(out, &parseutil.TableInfo{Name: alias, Alias: alias})
+                }
+            }
+        case *ast.IdentifierList:
+            for _, id := range t.GetIdentifiers() {
+                out = append(out, toInfos(id)...)
+            }
+        }
+        return out
+    }
+
+    nodes := []ast.Node{}
+    nodes = append(nodes, parseutil.ExtractTableReferences(parsed)...)
+    nodes = append(nodes, parseutil.ExtractTableReference(parsed)...)
+    nodes = append(nodes, parseutil.ExtractTableFactor(parsed)...)
+    infos := []*parseutil.TableInfo{}
+    seen := map[string]bool{}
+    for _, n := range nodes {
+        for _, ti := range toInfos(n) {
+            key := strings.ToUpper(ti.DatabaseSchema) + "\t" + strings.ToUpper(ti.Name)
+            if !seen[key] {
+                infos = append(infos, ti)
+                seen[key] = true
+            }
+        }
+    }
+    return infos
+}
+
+// GetColumnInfo returns information about a column
+func (v *ColumnValidator) GetColumnInfo(tableName, columnName string) (*database.ColumnDesc, bool) {
+	if v.dbCache == nil {
+		return nil, false
+	}
+
+	return v.dbCache.Column(tableName, columnName)
+}
+
+// GetColumnsForTable returns all columns for a table
+func (v *ColumnValidator) GetColumnsForTable(tableName string) ([]*database.ColumnDesc, bool) {
+	if v.dbCache == nil {
+		return nil, false
+	}
+
+	return v.dbCache.ColumnDescs(tableName)
+}
+
+// extractSelectColumnAliases extracts all column aliases from SELECT clause
+// Returns a map of alias names (lowercase) -> true
+// These aliases can be used in ORDER BY and HAVING clauses
+func (v *ColumnValidator) extractSelectColumnAliases(parsed ast.TokenList) map[string]bool {
+	aliases := make(map[string]bool)
+
+	// Extract all SELECT expressions
+	selectExprs := parseutil.ExtractSelectExpr(parsed)
+
+	// Walk through each SELECT expression to find aliases
+	for _, expr := range selectExprs {
+		walk(expr, func(n ast.Node) {
+			if aliased, ok := n.(*ast.Aliased); ok {
+				// Get the alias name
+				if aliased.AliasedName != nil {
+					aliasIdent := aliased.GetAliasedNameIdent()
+					if aliasIdent != nil {
+						aliasName := aliasIdent.NoQuoteString()
+						if aliasName != "" {
+							// Store as lowercase for case-insensitive matching
+							aliases[strings.ToLower(aliasName)] = true
+						}
+					}
+				}
+			}
+		})
+	}
+
+	return aliases
+}

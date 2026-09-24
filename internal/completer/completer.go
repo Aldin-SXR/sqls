@@ -301,6 +301,7 @@ func getCompletionTypes(nw *parseutil.NodeWalker) *CompletionContext {
 				CompletionTypeSubQuery,
 				CompletionTypeView,
 				CompletionTypeFunction,
+				CompletionTypeKeyword, // Allow keywords
 			}
 			p = noneParent
 		}
@@ -328,6 +329,7 @@ func getCompletionTypes(nw *parseutil.NodeWalker) *CompletionContext {
 				CompletionTypeSubQueryColumn,
 				CompletionTypeSubQuery,
 				CompletionTypeFunction,
+				CompletionTypeKeyword, // Allow keywords like FROM, AS, etc.
 			}
 		}
 	case syntaxPos == parseutil.TableReference:
@@ -350,6 +352,7 @@ func getCompletionTypes(nw *parseutil.NodeWalker) *CompletionContext {
 				CompletionTypeSchema,
 				CompletionTypeView,
 				CompletionTypeSubQuery,
+				CompletionTypeKeyword, // Allow keywords like JOIN, WHERE, etc.
 			}
 		}
 	case syntaxPos == parseutil.WhereCondition:
@@ -374,6 +377,7 @@ func getCompletionTypes(nw *parseutil.NodeWalker) *CompletionContext {
 				CompletionTypeSubQueryColumn,
 				CompletionTypeSubQuery,
 				CompletionTypeFunction,
+				CompletionTypeKeyword, // Allow keywords like AND, OR, etc.
 			}
 		}
 	case syntaxPos == parseutil.JoinClause:
@@ -384,6 +388,7 @@ func getCompletionTypes(nw *parseutil.NodeWalker) *CompletionContext {
 			CompletionTypeSchema,
 			CompletionTypeView,
 			CompletionTypeSubQuery,
+			CompletionTypeKeyword, // Allow keywords like INNER, LEFT, RIGHT, etc.
 		}
 	case syntaxPos == parseutil.JoinOn:
 		t = []completionType{

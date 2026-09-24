@@ -12,6 +12,8 @@ import (
 
 	"github.com/sqls-server/sqls/internal/config"
 	"github.com/sqls-server/sqls/internal/database"
+	"github.com/sqls-server/sqls/internal/lintconfig"
+	"github.com/sqls-server/sqls/internal/linter"
 	"github.com/sqls-server/sqls/internal/lsp"
 )
 
@@ -38,6 +40,7 @@ type Server struct {
 
 	worker *database.Worker
 	files  map[string]*File
+	linter *linter.Linter
 }
 
 type File struct {
@@ -219,6 +222,12 @@ func (s *Server) handleTextDocumentDidOpen(ctx context.Context, conn *jsonrpc2.C
 	if err := s.updateFile(params.TextDocument.URI, params.TextDocument.Text); err != nil {
 		return nil, err
 	}
+
+	// Lint the document
+	if err := s.lintDocument(ctx, conn, params.TextDocument.URI); err != nil {
+		log.Printf("failed to lint document: %v", err)
+	}
+
 	return nil, nil
 }
 
@@ -235,10 +244,68 @@ func (s *Server) handleTextDocumentDidChange(ctx context.Context, conn *jsonrpc2
 	if len(params.ContentChanges) == 0 {
 		return nil, nil
 	}
-	if err := s.updateFile(params.TextDocument.URI, params.ContentChanges[0].Text); err != nil {
+
+	// Apply changes; support both full and incremental sync
+	uri := params.TextDocument.URI
+	f, ok := s.files[uri]
+	if !ok {
+		return nil, fmt.Errorf("document not found: %s", uri)
+	}
+	cur := f.Text
+	for _, ch := range params.ContentChanges {
+		// If range is zeroed, treat as full text replacement
+		zero := ch.Range.Start.Line == 0 && ch.Range.Start.Character == 0 && ch.Range.End.Line == 0 && ch.Range.End.Character == 0 && ch.RangeLength == 0
+		if zero {
+			cur = ch.Text
+			continue
+		}
+		startOff := lspOffset(cur, ch.Range.Start)
+		endOff := lspOffset(cur, ch.Range.End)
+		if startOff < 0 || endOff < 0 || startOff > len(cur) || endOff > len(cur) || startOff > endOff {
+			// Fallback to replacing full text
+			cur = ch.Text
+			continue
+		}
+		cur = cur[:startOff] + ch.Text + cur[endOff:]
+	}
+	if err := s.updateFile(uri, cur); err != nil {
 		return nil, err
 	}
+
+	// Lint the document if linting on change is enabled
+	cfg := s.getConfig()
+	if cfg != nil && cfg.Linter != nil && cfg.Linter.LintOnChange {
+		if err := s.lintDocument(ctx, conn, params.TextDocument.URI); err != nil {
+			log.Printf("failed to lint document: %v", err)
+		}
+	}
+
 	return nil, nil
+}
+
+// lspOffset converts an LSP position to a byte offset in text (assumes UTF-8, counts runes by bytes for ASCII SQL)
+func lspOffset(text string, pos lsp.Position) int {
+	if pos.Line < 0 || pos.Character < 0 {
+		return -1
+	}
+	line := 0
+	idx := 0
+	for i := 0; i < len(text) && line < pos.Line; i++ {
+		if text[i] == '\n' {
+			line++
+			idx = i + 1
+		}
+	}
+	if line != pos.Line {
+		// beyond end; clamp to end
+		return len(text)
+	}
+	// Advance by characters from idx
+	off := idx + pos.Character
+	if off > len(text) {
+		return len(text)
+	}
+	return off
 }
 
 func (s *Server) handleTextDocumentDidSave(ctx context.Context, conn *jsonrpc2.Conn, req *jsonrpc2.Request) (result interface{}, err error) {
@@ -259,6 +326,15 @@ func (s *Server) handleTextDocumentDidSave(ctx context.Context, conn *jsonrpc2.C
 	if err != nil {
 		return nil, err
 	}
+
+	// Lint the document if linting on save is enabled
+	cfg := s.getConfig()
+	if cfg != nil && cfg.Linter != nil && cfg.Linter.LintOnSave {
+		if err := s.lintDocument(ctx, conn, params.TextDocument.URI); err != nil {
+			log.Printf("failed to lint document: %v", err)
+		}
+	}
+
 	return nil, nil
 }
 
@@ -270,6 +346,11 @@ func (s *Server) handleTextDocumentDidClose(ctx context.Context, conn *jsonrpc2.
 	var params lsp.DidCloseTextDocumentParams
 	if err := json.Unmarshal(*req.Params, &params); err != nil {
 		return nil, err
+	}
+
+	// Clear diagnostics before closing the file
+	if err := s.clearDiagnostics(ctx, conn, params.TextDocument.URI); err != nil {
+		log.Printf("failed to clear diagnostics: %v", err)
 	}
 
 	if err := s.closeFile(params.TextDocument.URI); err != nil {
@@ -425,6 +506,10 @@ func (s *Server) getConfig() *config.Config {
 		cfg = s.DefaultFileCfg
 	default:
 		cfg = config.NewConfig()
+	}
+	// Ensure linter config is always non-nil with sensible defaults
+	if cfg.Linter == nil {
+		cfg.Linter = lintconfig.DefaultConfig()
 	}
 	return cfg
 }

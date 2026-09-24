@@ -1,0 +1,140 @@
+# Example sqls configuration file with linter support
+# Place this file at ~/.config/sqls/config.yml
+
+# Database connections
+connections:
+  - alias: "development"
+    driver: "mysql"
+    dataSourceName: "user:password@tcp(localhost:3306)/mydb"
+
+  # Alternative PostgreSQL connection
+  # - alias: "postgres_dev"
+  #   driver: "postgresql"
+  #   dataSourceName: "host=localhost port=5432 user=postgres password=secret dbname=mydb sslmode=disable"
+
+  # Alternative SQLite connection
+  # - alias: "sqlite_local"
+  #   driver: "sqlite3"
+  #   dataSourceName: "/path/to/database.db"
+
+# Keyword formatting (legacy setting)
+lowercaseKeywords: false
+
+# Linter configuration
+linter:
+  # Enable the linter
+  enabled: true
+
+  # === SYNTAX VALIDATION ===
+  # Check for basic SQL syntax errors
+  checkSyntax: true
+
+  # === SEMANTIC VALIDATION ===
+  # Validate table references against the database
+  checkTableReferences: true
+
+  # Validate column references against table schemas
+  checkColumnReferences: true
+
+  # Validate schema/database references
+  checkSchemaReferences: true
+
+  # === SEMANTIC WARNINGS ===
+  # Warn about SELECT * usage (recommended for production code)
+  warnOnSelectStar: true
+
+  # Warn about incorrect NULL comparisons (= NULL instead of IS NULL)
+  warnOnNullComparison: true
+
+  # Warn about defined but unused aliases (can be noisy)
+  warnOnUnusedAlias: false
+
+  # Warn about implicit joins (comma-separated tables)
+  warnOnImplicitJoin: true
+
+  # Warn about ambiguous column references
+  warnOnAmbiguousColumn: true
+
+  # === STYLE RULES ===
+  # Check reserved word case consistency
+  # Options: "error", "warning", "info", "hint", "off"
+  checkReservedWordCase: "off"
+
+  # Preferred keyword case (used with checkReservedWordCase)
+  # Options: "upper", "lower"
+  preferredKeywordCase: "upper"
+
+  # Check for missing semicolons
+  # Options: "error", "warning", "info", "hint", "off"
+  checkMissingSemicolon: "off"
+
+  # === PERFORMANCE OPTIONS ===
+  # Maximum number of diagnostics to show per file
+  maxDiagnostics: 100
+
+  # Run linter as you type (real-time validation)
+  lintOnChange: true
+
+  # Run linter when file is saved
+  lintOnSave: true
+
+  # Enable debug mode for troubleshooting
+  debugMode: false
+
+# === EXAMPLE CONFIGURATIONS ===
+
+# Strict configuration (all checks enabled)
+# linter:
+#   enabled: true
+#   checkSyntax: true
+#   checkTableReferences: true
+#   checkColumnReferences: true
+#   checkSchemaReferences: true
+#   warnOnSelectStar: true
+#   warnOnNullComparison: true
+#   warnOnUnusedAlias: true
+#   warnOnImplicitJoin: true
+#   warnOnAmbiguousColumn: true
+#   checkReservedWordCase: "warning"
+#   preferredKeywordCase: "upper"
+#   checkMissingSemicolon: "warning"
+#   maxDiagnostics: 100
+#   lintOnChange: true
+#   lintOnSave: true
+
+# Minimal configuration (errors only)
+# linter:
+#   enabled: true
+#   checkSyntax: true
+#   checkTableReferences: true
+#   checkColumnReferences: true
+#   checkSchemaReferences: true
+#   warnOnSelectStar: false
+#   warnOnNullComparison: false
+#   warnOnUnusedAlias: false
+#   warnOnImplicitJoin: false
+#   warnOnAmbiguousColumn: false
+#   checkReservedWordCase: "off"
+#   checkMissingSemicolon: "off"
+#   maxDiagnostics: 100
+#   lintOnChange: false
+#   lintOnSave: true
+
+# Style-focused configuration
+# linter:
+#   enabled: true
+#   checkSyntax: true
+#   checkTableReferences: false
+#   checkColumnReferences: false
+#   checkSchemaReferences: false
+#   warnOnSelectStar: true
+#   warnOnNullComparison: true
+#   warnOnUnusedAlias: false
+#   warnOnImplicitJoin: true
+#   warnOnAmbiguousColumn: false
+#   checkReservedWordCase: "warning"
+#   preferredKeywordCase: "upper"
+#   checkMissingSemicolon: "hint"
+#   maxDiagnostics: 100
+#   lintOnChange: true
+#   lintOnSave: true

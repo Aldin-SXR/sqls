@@ -61,7 +61,7 @@ func ExtractTableReferences(parsed ast.TokenList) []ast.Node {
 			ast.TypeAliased,
 		},
 	}
-	return filterPrefixGroupOnce(astutil.NewNodeReader(parsed), prefixMatcher, peekMatcher)
+	return filterPrefixGroup(astutil.NewNodeReader(parsed), prefixMatcher, peekMatcher)
 }
 
 func ExtractTableReference(parsed ast.TokenList) []ast.Node {
@@ -142,7 +142,7 @@ func ExtractAliasedIdentifier(parsed ast.TokenList) []ast.Node {
 			results = append(results, node)
 			continue
 		}
-		if isSubQuery(list) {
+		if IsSubQuery(list) {
 			continue
 		}
 		results = append(results, node)
