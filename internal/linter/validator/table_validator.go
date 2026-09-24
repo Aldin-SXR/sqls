@@ -40,7 +40,7 @@ func (v *TableValidator) Validate(text string, db *diagnostic.DiagnosticBuilder)
     }
     // Gather potential table reference nodes across the statement
     nodes := []ast.Node{}
-    nodes = append(nodes, parseutil.ExtractTableReferences(parsed)...)
+    nodes = append(nodes, parseutil.ExtractAllTableReferences(parsed)...)
     nodes = append(nodes, parseutil.ExtractTableReference(parsed)...)
     nodes = append(nodes, parseutil.ExtractTableFactor(parsed)...)
 

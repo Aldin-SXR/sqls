@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/sqls-server/sqls/internal/database"
+	"github.com/sqls-server/sqls/internal/lintconfig"
 )
 
 func TestGetConfig(t *testing.T) {
@@ -26,6 +27,7 @@ func TestGetConfig(t *testing.T) {
 				fp: "basic.yml",
 			},
 			want: &Config{
+				Linter:            lintconfig.DefaultConfig(),
 				LowercaseKeywords: true,
 				Connections: []*database.DBConfig{
 					{
@@ -127,6 +129,7 @@ func TestGetConfig(t *testing.T) {
 				fp: "no_dsn.yml",
 			},
 			want: &Config{
+				Linter: lintconfig.DefaultConfig(),
 				Connections: []*database.DBConfig{
 					{
 						Alias:          "sqls_sqlite3",
@@ -171,6 +174,7 @@ func TestGetConfig(t *testing.T) {
 				fp: "oracle.yaml",
 			},
 			want: &Config{
+				Linter: lintconfig.DefaultConfig(),
 				Connections: []*database.DBConfig{
 					{
 						Alias:          "TestDB",

@@ -364,3 +364,15 @@ func TestExtractInsertValues(t *testing.T) {
 		})
 	}
 }
+
+func TestTableReferenceScopes(t *testing.T) {
+	query := initExtractTable(t, "SELECT it.ID FROM (SELECT city.ID FROM city) AS it")
+	scoped := ExtractTableReferences(query)
+	all := ExtractAllTableReferences(query)
+	if len(scoped) != 1 || scoped[0].String() != "(SELECT city.ID FROM city) AS it" {
+		t.Fatalf("unexpected outer references: %v", scoped)
+	}
+	if len(all) != 2 || all[1].String() != "city" {
+		t.Fatalf("linting must include the nested table: %v", all)
+	}
+}

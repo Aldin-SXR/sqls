@@ -62,7 +62,13 @@ func (tx *TestContext) initServer(t *testing.T) {
 	// Prepare the server and client connection.
 	client, server := net.Pipe()
 	tx.connServer = jsonrpc2.NewConn(tx.ctx, jsonrpc2.NewBufferedStream(server, jsonrpc2.VSCodeObjectCodec{}), tx.h)
-	tx.conn = jsonrpc2.NewConn(tx.ctx, jsonrpc2.NewBufferedStream(client, jsonrpc2.VSCodeObjectCodec{}), tx.h)
+	clientHandler := jsonrpc2.HandlerWithError(func(ctx context.Context, conn *jsonrpc2.Conn, req *jsonrpc2.Request) (interface{}, error) {
+		if req.Method == "textDocument/publishDiagnostics" {
+			return nil, nil
+		}
+		return tx.server.Handle(ctx, conn, req)
+	})
+	tx.conn = jsonrpc2.NewConn(tx.ctx, jsonrpc2.NewBufferedStream(client, jsonrpc2.VSCodeObjectCodec{}), clientHandler)
 
 	// Initialize Language Server
 	params := lsp.InitializeParams{
@@ -216,5 +222,33 @@ func (tx *TestContext) testFile(t *testing.T, uri, text string) {
 	}
 	if f.Text != text {
 		t.Errorf("not match %s. got: %s", text, f.Text)
+	}
+}
+
+func TestFullDocumentChanges(t *testing.T) {
+	tx := newTestContext()
+	tx.setup(t)
+	defer tx.tearDown()
+	tx.textDocumentDidOpen(t, testFileURI, "SELECT 1")
+	for _, tc := range []struct {
+		name    string
+		changes []lsp.TextDocumentContentChangeEvent
+		want    string
+	}{
+		{name: "empty batch", want: "SELECT 1"},
+		{name: "replacement without range", changes: []lsp.TextDocumentContentChangeEvent{{Text: "SELECT 2"}}, want: "SELECT 2"},
+		{name: "multiple replacements", changes: []lsp.TextDocumentContentChangeEvent{{Text: "SELECT 3"}, {Text: "SELECT 4"}}, want: "SELECT 4"},
+		{name: "clear document", changes: []lsp.TextDocumentContentChangeEvent{{Text: ""}}, want: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			params := lsp.DidChangeTextDocumentParams{
+				TextDocument:   lsp.VersionedTextDocumentIdentifier{URI: testFileURI},
+				ContentChanges: tc.changes,
+			}
+			if err := tx.conn.Call(tx.ctx, "textDocument/didChange", params, nil); err != nil {
+				t.Fatal(err)
+			}
+			tx.testFile(t, testFileURI, tc.want)
+		})
 	}
 }

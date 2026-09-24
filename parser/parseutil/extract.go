@@ -46,7 +46,17 @@ func ExtractSelectExpr(parsed ast.TokenList) []ast.Node {
 	return filterPrefixGroup(astutil.NewNodeReader(parsed), prefixMatcher, peekMatcher)
 }
 
+// ExtractTableReferences returns the first FROM/UPDATE group used for scope resolution.
 func ExtractTableReferences(parsed ast.TokenList) []ast.Node {
+	nodes := ExtractAllTableReferences(parsed)
+	if len(nodes) > 0 {
+		return nodes[:1]
+	}
+	return nil
+}
+
+// ExtractAllTableReferences includes nested FROM/UPDATE groups for linting.
+func ExtractAllTableReferences(parsed ast.TokenList) []ast.Node {
 	prefixMatcher := astutil.NodeMatcher{
 		ExpectKeyword: []string{
 			"FROM",

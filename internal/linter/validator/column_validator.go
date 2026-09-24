@@ -124,7 +124,7 @@ func (v *ColumnValidator) Validate(text string, db *diagnostic.DiagnosticBuilder
     }
 
     // Collect from all table reference extraction points
-    for _, node := range parseutil.ExtractTableReferences(parsed) {
+    for _, node := range parseutil.ExtractAllTableReferences(parsed) {
         collectTableRefPositions(node)
     }
     for _, node := range parseutil.ExtractTableReference(parsed) {
@@ -767,7 +767,7 @@ func (v *ColumnValidator) extractTableReferencesFromSubQuery(inner ast.TokenList
 	}
 
 	// Extract table references from this subquery scope
-	for _, node := range parseutil.ExtractTableReferences(inner) {
+	for _, node := range parseutil.ExtractAllTableReferences(inner) {
 		collectTableRefPositions(node)
 	}
 	for _, node := range parseutil.ExtractTableReference(inner) {
@@ -817,7 +817,7 @@ func (v *ColumnValidator) extractTables(parsed ast.TokenList, aliasMap map[strin
     }
 
     nodes := []ast.Node{}
-    nodes = append(nodes, parseutil.ExtractTableReferences(parsed)...)
+    nodes = append(nodes, parseutil.ExtractAllTableReferences(parsed)...)
     nodes = append(nodes, parseutil.ExtractTableReference(parsed)...)
     nodes = append(nodes, parseutil.ExtractTableFactor(parsed)...)
     infos := []*parseutil.TableInfo{}
