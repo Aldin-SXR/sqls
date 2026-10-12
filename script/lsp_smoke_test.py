@@ -317,6 +317,20 @@ class LSPTests(unittest.TestCase):
         result = self.client.call("textDocument/rename", {**self.at(text, "u.name"), "newName": "customer"})
         self.assertEqual(result["documentChanges"][0]["textDocument"]["version"], 12)
 
+    def test_rename_version_boundaries(self):
+        self.initialize()
+        text = "SELECT u.name FROM users AS u;"
+        for version in (-2147483648, 2147483647):
+            with self.subTest(version=version):
+                self.open(text, version=version)
+                result = self.client.call("textDocument/rename", {**self.at(text, "u.name"), "newName": "customer"})
+                self.assertEqual(result["documentChanges"][0]["textDocument"]["version"], version)
+        for version in (-2147483649, 2147483648):
+            with self.subTest(version=version):
+                response = self.client.response("textDocument/didChange", {
+                    "textDocument": {"uri": URI, "version": version}, "contentChanges": [{"text": text}]})
+                self.assertEqual(response["error"]["code"], -32602)
+
     def test_requests_after_shutdown(self):
         self.initialize()
         self.client.call("shutdown")

@@ -2,6 +2,7 @@ package validator
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/sqls-server/sqls/ast"
@@ -144,12 +145,10 @@ func checkPredicateSyntax(parsed ast.TokenList, db *diagnostic.DiagnosticBuilder
 				return
 			}
 			last := expr[len(expr)-1]
-			missingOperand := false
-			switch last.Kind {
-			case token.Eq, token.Neq, token.Lt, token.Gt, token.LtEq, token.GtEq,
-				token.Plus, token.Minus, token.Mult, token.Div, token.Mod, token.Caret, token.Period, token.Comma:
-				missingOperand = true
-			}
+			missingOperand := slices.Contains([]token.Kind{
+				token.Eq, token.Neq, token.Lt, token.Gt, token.LtEq, token.GtEq,
+				token.Plus, token.Minus, token.Mult, token.Div, token.Mod, token.Caret, token.Period, token.Comma,
+			}, last.Kind)
 			switch predicateKeyword(last) {
 			case "IS", "NOT", "IN", "LIKE", "ILIKE", "BETWEEN", "EXISTS", "REGEXP", "GLOB", "MATCH":
 				missingOperand = true

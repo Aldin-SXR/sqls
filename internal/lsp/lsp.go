@@ -101,7 +101,7 @@ type DidChangeTextDocumentParams struct {
 
 type VersionedTextDocumentIdentifier struct {
 	URI     string `json:"uri"`
-	Version int    `json:"version"`
+	Version int32  `json:"version"`
 }
 
 // https://microsoft.github.io/language-server-protocol/specifications/specification-3-14/#textDocument_didSave
@@ -222,7 +222,7 @@ type Hover struct {
 type TextDocumentItem struct {
 	URI        string `json:"uri"`
 	LanguageID string `json:"languageId"`
-	Version    int    `json:"version"`
+	Version    int32  `json:"version"`
 	Text       string `json:"text"`
 }
 

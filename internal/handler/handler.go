@@ -49,7 +49,7 @@ type Server struct {
 type File struct {
 	LanguageID string
 	Text       string
-	Version    int
+	Version    int32
 }
 
 func NewServer() *Server {

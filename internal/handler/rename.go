@@ -35,7 +35,7 @@ func (s *Server) handleTextDocumentRename(ctx context.Context, conn *jsonrpc2.Co
 	}
 	if res != nil {
 		for i := range res.DocumentChanges {
-			res.DocumentChanges[i].TextDocument.Version = int32(f.Version)
+			res.DocumentChanges[i].TextDocument.Version = f.Version
 		}
 	}
 	return res, nil
