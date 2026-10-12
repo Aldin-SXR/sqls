@@ -1,0 +1,19 @@
+{
+  "name": "sqls-lsp-playground",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:lsp": "go build -o ../sqls ..",
+    "start": "node server.mjs",
+    "pretest": "npm run build:lsp",
+    "test": "playwright test",
+    "test:protocol": "python3 ../script/lsp_smoke_test.py"
+  },
+  "dependencies": {
+    "monaco-editor": "0.57.0",
+    "ws": "8.22.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.64.0"
+  }
+}

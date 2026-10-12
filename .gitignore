@@ -39,3 +39,6 @@ dist/
 tags
 
 CLAUDE.md
+
+# Python LSP test fixtures
+__pycache__/

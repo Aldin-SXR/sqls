@@ -18,12 +18,13 @@ import (
 const testFileURI = "file:///Users/octref/Code/css-test/test.sql"
 
 type TestContext struct {
-	diagnostics chan lsp.PublishDiagnosticsParams
-	h           jsonrpc2.Handler
-	conn        *jsonrpc2.Conn
-	connServer  *jsonrpc2.Conn
-	server      *Server
-	ctx         context.Context
+	initializeResult lsp.InitializeResult
+	diagnostics      chan lsp.PublishDiagnosticsParams
+	h                jsonrpc2.Handler
+	conn             *jsonrpc2.Conn
+	connServer       *jsonrpc2.Conn
+	server           *Server
+	ctx              context.Context
 }
 
 func newTestContext() *TestContext {
@@ -56,6 +57,9 @@ func (tx *TestContext) tearDown() {
 			}
 		}
 	}
+	if err := tx.server.Stop(); err != nil {
+		log.Printf("server.Stop: %v", err)
+	}
 }
 
 func (tx *TestContext) initServer(t *testing.T) {
@@ -75,7 +79,12 @@ func (tx *TestContext) initServer(t *testing.T) {
 			}
 			return nil, nil
 		}
-		return tx.server.Handle(ctx, conn, req)
+		// Client notifications must not re-enter the server handler from the
+		// client's reader goroutine while initialize is still running.
+		if req.Method == "window/showMessage" || req.Method == "window/logMessage" {
+			return nil, nil
+		}
+		return nil, &jsonrpc2.Error{Code: jsonrpc2.CodeMethodNotFound}
 	})
 	tx.conn = jsonrpc2.NewConn(tx.ctx, jsonrpc2.NewBufferedStream(client, jsonrpc2.VSCodeObjectCodec{}), clientHandler)
 
@@ -83,7 +92,7 @@ func (tx *TestContext) initServer(t *testing.T) {
 	params := lsp.InitializeParams{
 		InitializationOptions: lsp.InitializeOptions{},
 	}
-	if err := tx.conn.Call(tx.ctx, "initialize", params, nil); err != nil {
+	if err := tx.conn.Call(tx.ctx, "initialize", params, &tx.initializeResult); err != nil {
 		t.Fatal("conn.Call initialize:", err)
 	}
 }
@@ -142,13 +151,7 @@ func TestInitialized(t *testing.T) {
 			RenameProvider:                  true,
 		},
 	}
-	var got lsp.InitializeResult
-	params := lsp.InitializeParams{
-		InitializationOptions: lsp.InitializeOptions{},
-	}
-	if err := tx.conn.Call(tx.ctx, "initialize", params, &got); err != nil {
-		t.Fatal("conn.Call initialize:", err)
-	}
+	got := tx.initializeResult
 	if !reflect.DeepEqual(want, got) {
 		t.Errorf("not match \n%+v\n%+v", want, got)
 	}

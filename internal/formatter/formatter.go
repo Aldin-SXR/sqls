@@ -1,7 +1,6 @@
 package formatter
 
 import (
-	"errors"
 	"strings"
 
 	"github.com/sqls-server/sqls/ast"
@@ -13,22 +12,16 @@ import (
 )
 
 func Format(text string, params lsp.DocumentFormattingParams, cfg *config.Config) ([]lsp.TextEdit, error) {
-	if text == "" {
-		return nil, errors.New("empty")
+	if strings.TrimSpace(text) == "" {
+		return nil, nil
 	}
 	parsed, err := parser.Parse(text)
 	if err != nil {
 		return nil, err
 	}
 
-	st := lsp.Position{
-		Line:      parsed.Pos().Line,
-		Character: parsed.Pos().Col,
-	}
-	en := lsp.Position{
-		Line:      parsed.End().Line,
-		Character: parsed.End().Col,
-	}
+	st := lsp.Position{}
+	en := lsp.PositionAt(text, len(text))
 	env := &formatEnvironment{
 		options: params.Options,
 	}

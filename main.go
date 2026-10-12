@@ -148,12 +148,19 @@ func serve(c *cli.Context) error {
 
 	// Start language server
 	log.Println("sqls: reading on stdin, writing on stdout")
-	<-jsonrpc2.NewConn(
+	conn := jsonrpc2.NewConn(
 		context.Background(),
 		jsonrpc2.NewBufferedStream(stdrwc{}, jsonrpc2.VSCodeObjectCodec{}),
 		h,
 		connOpt...,
-	).DisconnectNotify()
+	)
+	select {
+	case status := <-server.ExitNotify():
+		if status != 0 {
+			return errors.New("exit received before shutdown")
+		}
+	case <-conn.DisconnectNotify():
+	}
 	log.Println("sqls: connections closed")
 
 	return nil

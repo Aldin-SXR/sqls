@@ -38,14 +38,18 @@ type Server struct {
 	// other configuration sources (workspace and user).
 	initOptionDBConfig *database.DBConfig
 
-	worker *database.Worker
-	files  map[string]*File
-	linter *linter.Linter
+	worker      *database.Worker
+	files       map[string]*File
+	linter      *linter.Linter
+	shutdown    bool
+	initialized bool
+	exit        chan int
 }
 
 type File struct {
 	LanguageID string
 	Text       string
+	Version    int
 }
 
 func NewServer() *Server {
@@ -55,6 +59,7 @@ func NewServer() *Server {
 	return &Server{
 		files:  make(map[string]*File),
 		worker: worker,
+		exit:   make(chan int, 1),
 	}
 }
 
@@ -72,12 +77,12 @@ func panicf(r interface{}, format string, v ...interface{}) error {
 }
 
 func (s *Server) Stop() error {
-	if err := s.dbConn.Close(); err != nil {
-		return err
-	}
 	s.worker.Stop()
-	return nil
+	return s.dbConn.Close()
 }
+
+// ExitNotify reports the process status requested by an LSP exit notification.
+func (s *Server) ExitNotify() <-chan int { return s.exit }
 
 func (s *Server) Handle(ctx context.Context, conn *jsonrpc2.Conn, req *jsonrpc2.Request) (result interface{}, err error) {
 	// Prevent any uncaught panics from taking the entire server down.
@@ -88,11 +93,31 @@ func (s *Server) Handle(ctx context.Context, conn *jsonrpc2.Conn, req *jsonrpc2.
 	}()
 	res, err := s.handle(ctx, conn, req)
 	if err != nil {
+		var typeError *json.UnmarshalTypeError
+		var syntaxError *json.SyntaxError
+		if errors.As(err, &typeError) || errors.As(err, &syntaxError) {
+			err = &jsonrpc2.Error{Code: jsonrpc2.CodeInvalidParams, Message: err.Error()}
+		}
 		log.Printf("error serving, %+v\n", err)
 	}
 	return res, err
 }
 func (s *Server) handle(ctx context.Context, conn *jsonrpc2.Conn, req *jsonrpc2.Request) (result interface{}, err error) {
+	if !s.initialized && req.Method != "initialize" && req.Method != "exit" {
+		if req.Notif {
+			return nil, nil
+		}
+		return nil, &jsonrpc2.Error{Code: -32002, Message: "server is not initialized"}
+	}
+	if s.initialized && req.Method == "initialize" {
+		return nil, &jsonrpc2.Error{Code: jsonrpc2.CodeInvalidRequest, Message: "server is already initialized"}
+	}
+	if s.shutdown && req.Method != "exit" {
+		if req.Notif {
+			return nil, nil
+		}
+		return nil, &jsonrpc2.Error{Code: jsonrpc2.CodeInvalidRequest, Message: "server has shut down"}
+	}
 	switch req.Method {
 	case "initialize":
 		return s.handleInitialize(ctx, conn, req)
@@ -188,22 +213,25 @@ func (s *Server) handleInitialize(ctx context.Context, conn *jsonrpc2.Conn, req 
 			}
 		}
 	}
+	s.initialized = true
 	return result, nil
 }
 
 func (s *Server) handleShutdown(ctx context.Context, conn *jsonrpc2.Conn, req *jsonrpc2.Request) (result interface{}, err error) {
-	if s.dbConn != nil {
-		s.dbConn.Close()
-	}
+	s.shutdown = true
 	return nil, nil
 }
 
 func (s *Server) handleExit(ctx context.Context, conn *jsonrpc2.Conn, req *jsonrpc2.Request) (result interface{}, err error) {
-	if s.dbConn != nil {
-		s.dbConn.Close()
+	status := 1
+	if s.shutdown {
+		status = 0
 	}
-	err = s.Stop()
-	return nil, err
+	select {
+	case s.exit <- status:
+	default:
+	}
+	return nil, nil
 }
 
 func (s *Server) handleTextDocumentDidOpen(ctx context.Context, conn *jsonrpc2.Conn, req *jsonrpc2.Request) (result interface{}, err error) {
@@ -222,6 +250,8 @@ func (s *Server) handleTextDocumentDidOpen(ctx context.Context, conn *jsonrpc2.C
 	if err := s.updateFile(params.TextDocument.URI, params.TextDocument.Text); err != nil {
 		return nil, err
 	}
+
+	s.files[params.TextDocument.URI].Version = params.TextDocument.Version
 
 	// Lint the document
 	if err := s.lintDocument(ctx, conn, params.TextDocument.URI); err != nil {
@@ -250,6 +280,8 @@ func (s *Server) handleTextDocumentDidChange(ctx context.Context, conn *jsonrpc2
 	if err := s.updateFile(params.TextDocument.URI, text); err != nil {
 		return nil, err
 	}
+
+	s.files[params.TextDocument.URI].Version = params.TextDocument.Version
 
 	// Lint the document if linting on change is enabled
 	cfg := s.getConfig()
@@ -341,6 +373,9 @@ func (s *Server) saveFile(uri string) error {
 }
 
 func (s *Server) handleWorkspaceDidChangeConfiguration(ctx context.Context, conn *jsonrpc2.Conn, req *jsonrpc2.Request) (result interface{}, err error) {
+	if req.Params == nil {
+		return nil, &jsonrpc2.Error{Code: jsonrpc2.CodeInvalidParams}
+	}
 	// Update changed configuration
 	var params lsp.DidChangeConfigurationParams
 	if err := json.Unmarshal(*req.Params, &params); err != nil {

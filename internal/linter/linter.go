@@ -74,6 +74,7 @@ func (l *Linter) runValidators(text string, parsed ast.TokenList, db *diagnostic
 	// 1. Syntax validation
 	if l.config.CheckSyntax {
 		l.syntaxValidator.Validate(parsed, db)
+		validator.CheckPredicateTypes(parsed, l.dbCache, l.driver, db)
 	}
 
 	// 2. Table validation
@@ -122,6 +123,12 @@ func (l *Linter) UpdateConfig(config *lintconfig.Config) {
 
 // UpdateDBCache updates the database cache
 func (l *Linter) UpdateDBCache(dbCache *database.DBCache) {
+	l.UpdateDatabase(dbCache, l.driver)
+}
+
+// UpdateDatabase keeps schema and dialect checks in sync after reconnection.
+func (l *Linter) UpdateDatabase(dbCache *database.DBCache, driver string) {
+	l.driver = driver
 	l.dbCache = dbCache
 	l.tableValidator = validator.NewTableValidator(l.config, dbCache)
 	l.columnValidator = validator.NewColumnValidator(l.config, dbCache, l.driver)

@@ -4,6 +4,8 @@
 
 An implementation of the Language Server Protocol for SQL.
 
+For local LSP testing, see the [browser playground and protocol tests](web/README.md).
+
 ## Note
 
 This project is currently under development and there is no stable release. Therefore, destructive interface changes and configuration changes are expected.

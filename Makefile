@@ -36,6 +36,15 @@ $(GOBIN)/gobump:
 test: build
 	go test -v ./...
 
+.PHONY: test-lsp
+test-lsp: build
+	python3 script/lsp_smoke_test.py
+
+.PHONY: test-web
+test-web:
+	npm --prefix web ci
+	npm --prefix web test
+
 .PHONY: clean
 clean:
 	go clean

@@ -22,7 +22,7 @@ func NewSyntaxValidator(config *lintconfig.Config) *SyntaxValidator {
 
 // Validate performs core syntax validations on the AST
 func (v *SyntaxValidator) Validate(parsed ast.TokenList, db *diagnostic.DiagnosticBuilder) {
-	// Minimal: detect NULL comparisons with = or !=
+	checkPredicateSyntax(parsed, db)
 	v.checkNullComparisons(parsed, db)
 }
 

@@ -6,6 +6,7 @@ import (
 	"io"
 	"strings"
 	"text/scanner"
+	"unicode/utf16"
 
 	"github.com/sqls-server/sqls/dialect"
 )
@@ -270,7 +271,7 @@ func (t *Tokenizer) next() (Kind, interface{}, error) {
 					t.Scanner.Next()
 					s = append(s, ch)
 				} else {
-					t.Col += len(s) + 2
+					t.Col += len(utf16.Encode(s)) + 2
 					return Comment, string(s), nil // Comment Node
 				}
 			}
@@ -395,7 +396,7 @@ func (t *Tokenizer) next() (Kind, interface{}, error) {
 		return ILLEGAL, "", io.EOF
 	default:
 		t.Scanner.Next()
-		t.Col++
+		t.Col += utf16.RuneLen(r)
 		return Char, string(r), nil
 	}
 }
@@ -413,29 +414,28 @@ func (t *Tokenizer) tokenizeWord(f rune) string {
 			break
 		}
 	}
-	t.Col += len(str)
+	t.Col += len(utf16.Encode(str))
 	return string(str)
 }
 
 func (t *Tokenizer) tokenizeSingleQuotedString() string {
 	var str []rune
 	t.Scanner.Next()
-	cols := 1
+	t.Col++
 	isClosed := false
 
 	for {
 		n := t.Scanner.Peek()
 		if n == '\'' {
 			t.Scanner.Next()
+			t.Col++
 			if t.Scanner.Peek() == '\'' {
-				// An escaped quote consumes two source columns
-				// but is stored as a single rune.
-				str = append(str, '\'')
+				// Preserve SQL escaping so formatting can round-trip the literal.
+				str = append(str, '\'', '\'')
 				t.Scanner.Next()
-				cols += 2
+				t.Col++
 			} else {
 				isClosed = true
-				cols++
 				break
 			}
 			continue
@@ -446,10 +446,19 @@ func (t *Tokenizer) tokenizeSingleQuotedString() string {
 
 		t.Scanner.Next()
 		str = append(str, n)
-		cols++
+		switch n {
+		case '\r':
+			t.Line++
+			t.Col = 0
+		case '\n':
+			if len(str) < 2 || str[len(str)-2] != '\r' {
+				t.Line++
+			}
+			t.Col = 0
+		default:
+			t.Col += utf16.RuneLen(n)
+		}
 	}
-
-	t.Col += cols
 	if isClosed {
 		return "'" + string(str) + "'"
 	}
@@ -478,10 +487,10 @@ func (t *Tokenizer) tokenizeDelimitedIdentifier(r rune) *SQLWord {
 	}
 
 	if isClosed {
-		t.Col += 2 + len(s)
+		t.Col += 2 + len(utf16.Encode(s))
 		return MakeKeyword(string(s), r)
 	}
-	t.Col += 1 + len(s)
+	t.Col += 1 + len(utf16.Encode(s))
 	return MakeKeyword(string(r)+string(s), 0)
 }
 
@@ -505,7 +514,7 @@ func (t *Tokenizer) tokenizeMultilineComment() (string, error) {
 		case scanner.EOF:
 			return "", fmt.Errorf("unclosed multiline comment: %s at %+v", string(str), t.Pos())
 		default:
-			t.Col++
+			t.Col += utf16.RuneLen(n)
 		}
 
 		if mayBeClosingComment {

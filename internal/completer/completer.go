@@ -90,6 +90,11 @@ func completionTypeIs(completionTypes []completionType, expect completionType) b
 }
 
 func (c *Completer) Complete(text string, params lsp.CompletionParams, lowercaseKeywords bool) ([]lsp.CompletionItem, error) {
+	if strings.TrimSpace(text) == "" {
+		items := c.keywordCandidates(lowercaseKeywords, dialect.DataBaseKeywords(c.Driver))
+		populateSortText(items)
+		return items, nil
+	}
 	parsed, err := parser.Parse(text)
 	if err != nil {
 		return nil, err

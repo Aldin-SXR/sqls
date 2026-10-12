@@ -33,6 +33,11 @@ func (s *Server) handleTextDocumentRename(ctx context.Context, conn *jsonrpc2.Co
 	if err != nil {
 		return nil, err
 	}
+	if res != nil {
+		for i := range res.DocumentChanges {
+			res.DocumentChanges[i].TextDocument.Version = int32(f.Version)
+		}
+	}
 	return res, nil
 }
 
@@ -44,7 +49,7 @@ func rename(text string, params lsp.RenameParams) (*lsp.WorkspaceEdit, error) {
 
 	pos := token.Pos{
 		Line: params.Position.Line,
-		Col:  params.Position.Character,
+		Col:  params.Position.Character + 1,
 	}
 
 	// Get the identifier on focus

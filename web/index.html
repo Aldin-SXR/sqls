@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SQLS LSP playground</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header><div><strong>SQLS</strong> <span>LSP playground</span></div><span id="status" role="status">Connecting…</span></header>
+  <main>
+    <section class="workspace">
+      <div class="toolbar">
+        <label>Example <select id="example"><option value="select">Select & aliases</option><option value="insert">Insert & signature help</option><option value="lint">Diagnostics</option><option value="unicode">Unicode</option></select></label>
+        <button id="format">Format</button><button id="range-format">Format selection</button>
+        <button id="execute">Run query</button><button id="restart">Restart LSP</button>
+      </div>
+      <div id="editor" aria-label="SQL editor"></div>
+      <div class="hint">Ctrl+Space completion · Hover for column types · F12 definition · F2 rename · Ctrl+Shift+Space signature help</div>
+      <div class="results"><h2>Query result</h2><pre id="result">Run a query against the sample database.</pre></div>
+    </section>
+    <aside>
+      <section><h2>Sample schema</h2><p><b>users</b><br>id INTEGER · name TEXT · email TEXT</p><p><b>orders</b><br>id INTEGER · user_id INTEGER → users.id · total REAL</p></section>
+      <section><h2>Diagnostics <span id="diagnostic-count">0</span></h2><ul id="diagnostics"></ul></section>
+      <section class="traffic"><h2>Protocol traffic <button id="clear-log">Clear</button></h2><pre id="log"></pre></section>
+    </aside>
+  </main>
+  <script src="/vendor/vs/loader.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>
